@@ -3,8 +3,8 @@
 ## [Unreleased]
 
 ### Fixed
-- PAM integration now passes `PAM_USER` correctly via `setenv yes env_pass` (previously could resolve to `root` and fail authentication)
-- Added `timeout=10` to PAM stanzas to prevent indefinite hangs if camera is unplugged
+- User detection now uses a fallback chain (`PAM_USER` → `USER` → `LOGNAME` → `id -un`), no `setenv`/`env_pass` flags needed
+- Removed `timeout=10` from PAM stanzas (causes pam_exec to block on stdin; face-auth reads the camera, not stdin)
 - `deploy.sh` no longer wipes `/var/lib/face-auth/` on redeploy (preserves enrolled users)
 - Model checksum mismatch now aborts deployment instead of continuing with potentially corrupted model
 - User config (`~/.config/face-auth.toml`) now correctly overrides system config (`/etc/face-auth.toml`)

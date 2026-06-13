@@ -46,9 +46,9 @@ The deploy script adds a `sufficient` `pam_exec.so` line to:
 | `gdm-password` | `/etc/pam.d/gdm-password` | GNOME lock screen |
 | `swaylock` | `/etc/pam.d/swaylock` | Sway lock screen |
 
-`timeout=10 setenv yes env_pass` ensures the binary gets the correct username, fails fast if the camera hangs, and never blocks login indefinitely.
-
 `sufficient` means face-auth success = authenticated; failure = fall through to password.
+
+No `timeout`, `setenv`, or `env_pass` flags are needed — face-auth reads the camera, not stdin, and resolves `PAM_USER` via its own fallback chain.
 
 ## SELinux
 

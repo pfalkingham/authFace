@@ -80,10 +80,10 @@ for service in sudo swaylock gdm-password; do
 
     if [ "$service" = "gdm-password" ]; then
         # Insert after pam_selinux_permit.so line (lock screen)
-        sed -i '/^auth.*pam_selinux_permit\.so$/a auth       sufficient  pam_exec.so timeout=10 setenv yes env_pass /usr/local/bin/face-auth' "$conf"
+        sed -i '/^auth.*pam_selinux_permit\.so$/a auth       sufficient  pam_exec.so /usr/local/bin/face-auth' "$conf"
     else
         # Insert after #%PAM-1.0 (must remain first line)
-        sed -i '/^#%PAM-1\.0/a auth       sufficient  pam_exec.so timeout=10 setenv yes env_pass /usr/local/bin/face-auth' "$conf"
+        sed -i '/^#%PAM-1\.0/a auth       sufficient  pam_exec.so /usr/local/bin/face-auth' "$conf"
     fi
     echo "Updated $conf (backup at $conf.face-auth.bak)"
 done
