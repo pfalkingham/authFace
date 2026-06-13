@@ -1,0 +1,19 @@
+[workspace]
+members = [
+    "crates/face-auth-core",
+    "crates/face-auth",
+    "crates/face-enroll",
+]
+resolver = "2"
+
+[workspace.dependencies]
+tract-onnx = "0.21"
+image = "0.25"
+anyhow = "1.0"
+thiserror = "1.0"
+config = { version = "0.14", features = ["toml"] }
+dirs = "5.0"
+clap = { version = "4.5", features = ["derive", "env"] }
+byteorder = "1.5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -1,0 +1,10 @@
+module face_auth 1.0;
+
+require {
+    type xdm_t;
+    type v4l_device_t;
+    class chr_file map;
+}
+
+# Allow GDM/gdm-password (xdm_t) to mmap the IR camera for capture
+allow xdm_t v4l_device_t:chr_file map;

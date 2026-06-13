@@ -1,0 +1,10 @@
+[package]
+name = "face-auth"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+face-auth-core = { path = "../face-auth-core" }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

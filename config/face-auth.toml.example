@@ -1,0 +1,15 @@
+# Face Authentication Configuration
+# Copy to /etc/face-auth.toml (system) or ~/.config/face-auth.toml (user)
+# Environment variables FACE_AUTH_* take precedence
+
+# IR camera device path (auto-detected if not set)
+# device = "/dev/video3"
+
+# Cosine similarity threshold (0.0 - 1.0, lower = more permissive)
+threshold = 0.6
+
+# ONNX model path (default: /usr/local/share/face-auth/w600k_mbf.onnx)
+# model_path = "/usr/local/share/face-auth/w600k_mbf.onnx"
+
+# Embeddings storage directory
+# embeddings_dir = "/var/lib/face-auth"
