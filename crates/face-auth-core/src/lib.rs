@@ -24,7 +24,7 @@ impl FaceAuth {
     }
     
     pub fn authenticate(&mut self, user: &str) -> Result<bool> {
-        let frame = crate::capture::capture_ir_frame(&self.config.device())?;
+        let frame = crate::capture::capture_ir_frame(&self.config.device(), self.config.capture_timeout_ms())?;
         let mut frame = frame;
         crate::preprocess::histogram_equalize(&mut frame);
         let input = crate::preprocess::preprocess_ir_frame(&frame)?;
@@ -39,7 +39,7 @@ impl FaceAuth {
         
         for i in 0..frames {
             println!("Capturing frame {}/{}...", i + 1, frames);
-            let frame = crate::capture::capture_ir_frame(&self.config.device())?;
+            let frame = crate::capture::capture_ir_frame(&self.config.device(), self.config.capture_timeout_ms())?;
             let mut frame = frame;
             crate::preprocess::histogram_equalize(&mut frame);
             let input = crate::preprocess::preprocess_ir_frame(&frame)?;

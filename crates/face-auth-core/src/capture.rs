@@ -1,7 +1,8 @@
 use nix::fcntl::{open, OFlag};
 use nix::sys::stat::Mode;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use libc::{c_void, mmap, munmap, PROT_READ, PROT_WRITE, MAP_SHARED, MAP_FAILED};
+use nix::poll::{PollFd, PollFlags, PollTimeout};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+use libc::{c_void, mmap, munmap, PROT_READ, MAP_SHARED, MAP_FAILED};
 use anyhow::Result;
 
 // Correct ioctl numbers from kernel headers (x86_64)
@@ -89,7 +90,7 @@ pub struct IrFrame {
     pub height: u32,
 }
 
-pub fn capture_ir_frame(device_path: &str) -> Result<IrFrame> {
+pub fn capture_ir_frame(device_path: &str, timeout_ms: i32) -> Result<IrFrame> {
     let fd = open(device_path, OFlag::O_RDWR, Mode::empty())
         .map_err(|e| anyhow::anyhow!("Failed to open {}: {}", device_path, e))?;
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
@@ -146,6 +147,27 @@ pub fn capture_ir_frame(device_path: &str) -> Result<IrFrame> {
     ioctl(fd.as_raw_fd(), VIDIOC_STREAMON, &stream_type as *const _ as *mut c_void)?;
 
     let mut frame_data = None;
+
+    // Wait for frame with timeout (poll before DQBUF to avoid blocking forever)
+    let mut poll_fds = [PollFd::new(fd.as_fd(), PollFlags::POLLIN)];
+    let poll_timeout: PollTimeout = if timeout_ms > 0 {
+        PollTimeout::from(timeout_ms as u16)
+    } else {
+        PollTimeout::from(None::<u16>)
+    };
+    match nix::poll::poll(&mut poll_fds, poll_timeout) {
+        Ok(0) => {
+            let _ = ioctl(fd.as_raw_fd(), VIDIOC_STREAMOFF, &stream_type as *const _ as *mut c_void);
+            unsafe { munmap(mmap_ptr, length) };
+            return Err(anyhow::anyhow!("Camera capture timed out after {}ms", timeout_ms));
+        }
+        Ok(_) => {}
+        Err(e) => {
+            let _ = ioctl(fd.as_raw_fd(), VIDIOC_STREAMOFF, &stream_type as *const _ as *mut c_void);
+            unsafe { munmap(mmap_ptr, length) };
+            return Err(anyhow::anyhow!("poll failed: {}", e));
+        }
+    }
 
     for _ in 0..3 {
         let mut buf = v4l2_buffer {

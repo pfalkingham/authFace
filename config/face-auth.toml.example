@@ -13,3 +13,7 @@ threshold = 0.6
 
 # Embeddings storage directory
 # embeddings_dir = "/var/lib/face-auth"
+
+# Camera capture timeout in milliseconds (default: 5000)
+# Set to 0 for infinite wait (not recommended)
+capture_timeout_ms = 5000

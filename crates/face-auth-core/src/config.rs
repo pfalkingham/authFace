@@ -9,6 +9,7 @@ pub struct FaceAuthConfig {
     pub threshold: Option<f32>,
     pub model_path: Option<String>,
     pub embeddings_dir: Option<String>,
+    pub capture_timeout_ms: Option<u64>,
 }
 
 impl Default for FaceAuthConfig {
@@ -18,6 +19,7 @@ impl Default for FaceAuthConfig {
             threshold: Some(0.6),
             model_path: None,
             embeddings_dir: None,
+            capture_timeout_ms: Some(5000),
         }
     }
 }
@@ -64,6 +66,10 @@ impl FaceAuthConfig {
                 std::env::var("FACE_AUTH_MODEL_PATH").ok()
             })
             .unwrap_or_else(|| "/usr/local/share/face-auth/w600k_mbf.onnx".to_string())
+    }
+
+    pub fn capture_timeout_ms(&self) -> i32 {
+        self.capture_timeout_ms.unwrap_or(5000) as i32
     }
 
     pub fn embeddings_dir(&self) -> PathBuf {

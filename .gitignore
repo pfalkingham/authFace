@@ -22,3 +22,4 @@ models/
 *.swp
 *.swo
 *~
+.bash_history
