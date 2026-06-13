@@ -2,6 +2,8 @@
 
 IR camera facial authentication for Linux. Inspired by Howdy, but built to work on immutable distros (Bluefin, Silverblue, etc.) because it's just a static binary + PAM config — no packages, no daemons, no layering.
 
+If it's useful, feel free to [BuyMeACoffee](buymeacoffee.com/pfalkingham)
+
 ## Features
 
 - **Windows Hello–style IR camera auth** for sudo and GNOME lock screen
