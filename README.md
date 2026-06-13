@@ -1,6 +1,6 @@
 # authFace
 
-IR camera facial authentication for Linux. Works on immutable distros (Bluefin, Silverblue, etc.) because it's just a static binary + PAM config — no packages, no daemons, no layering.
+IR camera facial authentication for Linux. Inspired by Howdy, but built to work on immutable distros (Bluefin, Silverblue, etc.) because it's just a static binary + PAM config — no packages, no daemons, no layering.
 
 ## Features
 
@@ -273,6 +273,10 @@ authFace/
   deploy.sh                # Installation script
   uninstall.sh             # Removal script
 ```
+
+## TODO
+
+A UI for setup would probably be good.
 
 ## License
 
