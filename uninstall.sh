@@ -1,6 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 
+PURGE=false
+if [[ "${1:-}" == "--purge" ]]; then
+    PURGE=true
+fi
+
 BIN_DIR="/usr/local/bin"
 SHARE_DIR="/usr/local/share/face-auth"
 CONFIG_DIR="/etc"
@@ -32,6 +37,13 @@ echo "Removing SELinux policy module..."
 semodule -r face_auth 2>/dev/null || true
 
 echo ""
-echo "Uninstall complete!"
-echo "Note: User embeddings in /var/lib/face-auth/ were NOT removed."
-echo "Remove manually with: rm -rf /var/lib/face-auth/"
+if [ "$PURGE" = true ]; then
+    echo "Removing user embeddings..."
+    rm -rf /var/lib/face-auth/
+    echo "Uninstall complete (including user embeddings)."
+else
+    echo "Uninstall complete!"
+    echo "Note: User embeddings in /var/lib/face-auth/ were preserved."
+    echo "Remove them manually with: sudo rm -rf /var/lib/face-auth/"
+    echo "Or run again with --purge to remove them automatically."
+fi

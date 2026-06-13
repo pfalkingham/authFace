@@ -26,16 +26,18 @@ impl FaceAuthConfig {
     pub fn load() -> anyhow::Result<Self> {
         let mut builder = Config::builder();
 
+        // System config (lower priority)
+        let system_config = PathBuf::from("/etc/face-auth.toml");
+        if system_config.exists() {
+            builder = builder.add_source(File::from(system_config));
+        }
+
+        // User config (higher priority, overrides system)
         if let Some(config_dir) = dirs::config_dir() {
             let user_config = config_dir.join("face-auth.toml");
             if user_config.exists() {
                 builder = builder.add_source(File::from(user_config));
             }
-        }
-
-        let system_config = PathBuf::from("/etc/face-auth.toml");
-        if system_config.exists() {
-            builder = builder.add_source(File::from(system_config));
         }
 
         builder = builder.add_source(Environment::with_prefix("FACE_AUTH"));

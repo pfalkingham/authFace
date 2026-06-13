@@ -33,6 +33,18 @@ struct Args {
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     
+    // Validate user exists on the system
+    if std::process::Command::new("getent")
+        .arg("passwd")
+        .arg(&args.user)
+        .status()
+        .map(|s| !s.success())
+        .unwrap_or(true)
+    {
+        eprintln!("Error: user '{}' does not exist on this system", args.user);
+        std::process::exit(1);
+    }
+    
     let filter = if args.verbose {
         EnvFilter::new("face_auth_core=debug")
     } else {

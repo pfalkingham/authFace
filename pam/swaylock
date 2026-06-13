@@ -1,1 +1,1 @@
-auth    sufficient  pam_exec.so /usr/local/bin/face-auth
+auth    sufficient  pam_exec.so timeout=10 setenv yes env_pass /usr/local/bin/face-auth

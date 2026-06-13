@@ -5,6 +5,8 @@ use libc::{c_void, mmap, munmap, PROT_READ, PROT_WRITE, MAP_SHARED, MAP_FAILED};
 use anyhow::Result;
 
 // Correct ioctl numbers from kernel headers (x86_64)
+// NOTE: This module is x86_64-only. ioctl numbers and struct layouts are ABI-dependent.
+// For ARM/aarch64 support, replace with the `v4l` or `v4l2-sys` crates.
 const VIDIOC_S_FMT: u64 = 0xc0d05605;
 const VIDIOC_G_FMT: u64 = 0xc0d05604;
 const VIDIOC_REQBUFS: u64 = 0xc0145608;
@@ -122,7 +124,7 @@ pub fn capture_ir_frame(device_path: &str) -> Result<IrFrame> {
         mmap(
             std::ptr::null_mut(),
             length,
-            PROT_READ | PROT_WRITE,
+            PROT_READ,
             MAP_SHARED,
             fd.as_raw_fd(),
             offset,

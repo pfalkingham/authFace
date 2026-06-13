@@ -46,6 +46,8 @@ The deploy script adds a `sufficient` `pam_exec.so` line to:
 | `gdm-password` | `/etc/pam.d/gdm-password` | GNOME lock screen |
 | `swaylock` | `/etc/pam.d/swaylock` | Sway lock screen |
 
+`timeout=10 setenv yes env_pass` ensures the binary gets the correct username, fails fast if the camera hangs, and never blocks login indefinitely.
+
 `sufficient` means face-auth success = authenticated; failure = fall through to password.
 
 ## SELinux
@@ -100,6 +102,20 @@ journalctl | grep -i "pam_exec\|face-auth"
 # SELinux denials
 journalctl -k | grep face-auth | grep denied
 ```
+
+## Security & Limitations
+
+- **IR-only, no liveness detection:** Uses IR camera (not RGB), which resists casual photo spoofing. Does **not** perform structured-light or dot-projection depth checks. High-quality IR-transparent prints or 3D masks may bypass verification.
+- **SELinux policy scope:** The lock-screen policy grants `xdm_t` mmap access to all V4L2 devices. This is a trade-off for drop-in compatibility; narrowing it requires custom udev device types and is out of scope.
+- **x86_64 only:** V4L2 ioctl numbers and struct layouts are hardcoded for x86_64. ARM/aarch64 support requires switching to the `v4l` crate.
+- **Model integrity:** `deploy.sh` verifies the ONNX model SHA-256 checksum and aborts on mismatch.
+
+## Architecture
+
+- Static musl binary (~20 MB, zero runtime dependencies)
+- `pam_exec.so` bridges PAM → face-auth binary → V4L2 capture → tract-onnx inference
+- Binary embedding storage (`/var/lib/face-auth/<user>/embeddings.bin`) with versioning and atomic writes
+- Config priority: environment vars > `~/.config/face-auth.toml` > `/etc/face-auth.toml` > defaults
 
 ## License
 

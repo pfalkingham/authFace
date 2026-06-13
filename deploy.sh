@@ -16,11 +16,9 @@ ACTUAL_USER="${SUDO_USER:-$USER}"
 # ---- Undo any previous partial setup ----
 echo "Cleaning up any previous partial setup..."
 
-rm -rf "$VAR_DIR"
-
 for service in sudo swaylock gdm-password; do
     if [ -f "$PAM_DIR/$service" ]; then
-        sed -i '/^auth\s\+sufficient\s\+pam_exec\.so.*face-auth/d' "$PAM_DIR/$service" 2>/dev/null || true
+        sed -i '/^auth\s\s*sufficient\s\s*pam_exec\.so.*face-auth/d' "$PAM_DIR/$service" 2>/dev/null || true
     fi
 done
 
@@ -56,8 +54,9 @@ else
     unzip -o /tmp/face-auth-model/buffalo_sc.zip -d /tmp/face-auth-model/
     echo "Verifying checksum..."
     echo "$MODEL_CHECKSUM  /tmp/face-auth-model/$MODEL_NAME" | sha256sum -c - || {
-        echo "Warning: Checksum mismatch! The model may be corrupted."
-        echo "Continuing anyway..."
+        echo "Error: Checksum mismatch! The model may be corrupted or tampered."
+        rm -rf /tmp/face-auth-model
+        exit 1
     }
     install -Dm644 "/tmp/face-auth-model/$MODEL_NAME" "$SHARE_DIR/$MODEL_NAME"
     rm -rf /tmp/face-auth-model
@@ -81,10 +80,10 @@ for service in sudo swaylock gdm-password; do
 
     if [ "$service" = "gdm-password" ]; then
         # Insert after pam_selinux_permit.so line (lock screen)
-        sed -i '/^auth.*pam_selinux_permit\.so$/a auth       sufficient  pam_exec.so /usr/local/bin/face-auth' "$conf"
+        sed -i '/^auth.*pam_selinux_permit\.so$/a auth       sufficient  pam_exec.so timeout=10 setenv yes env_pass /usr/local/bin/face-auth' "$conf"
     else
         # Insert after #%PAM-1.0 (must remain first line)
-        sed -i '/^#%PAM-1\.0/a auth       sufficient  pam_exec.so /usr/local/bin/face-auth' "$conf"
+        sed -i '/^#%PAM-1\.0/a auth       sufficient  pam_exec.so timeout=10 setenv yes env_pass /usr/local/bin/face-auth' "$conf"
     fi
     echo "Updated $conf (backup at $conf.face-auth.bak)"
 done

@@ -8,7 +8,7 @@ resolver = "2"
 
 [workspace.dependencies]
 tract-onnx = "0.21"
-image = "0.25"
+image = "0.25.4"
 anyhow = "1.0"
 thiserror = "1.0"
 config = { version = "0.14", features = ["toml"] }
