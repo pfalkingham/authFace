@@ -51,7 +51,7 @@ impl FaceAuth {
     
     pub fn enroll(&mut self, user: &str, frames: usize, interval_ms: u64) -> Result<()> {
         let mut store = EmbeddingStore::default();
-        let mut cam = Camera::open(&self.config.device(), 640, 400)?;
+        let mut cam = Camera::open(&self.config.device())?;
         
         for i in 0..frames {
             println!("Capturing frame {}/{}...", i + 1, frames);

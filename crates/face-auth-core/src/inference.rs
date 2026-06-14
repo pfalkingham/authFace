@@ -3,7 +3,7 @@ use crate::error::FaceAuthError;
 use tract_onnx::prelude::*;
 
 pub struct FaceEncoder {
-    model: SimplePlan<TypedFact, Box<dyn TypedOp>, TypedModel>,
+    model: InferenceSimplePlan<InferenceModel>,
 }
 
 impl FaceEncoder {
@@ -14,16 +14,16 @@ impl FaceEncoder {
             .into_runnable()?;
         Ok(Self { model })
     }
-    
+
     pub fn encode(&mut self, input: tract_ndarray::ArrayView3<f32>) -> anyhow::Result<Vec<f32>> {
         let mut input = input.to_owned().into_dyn();
         input.insert_axis_inplace(tract_ndarray::Axis(0));
         let input_value = Tensor::from(input).into_tvalue();
         let result = self.model.run(tvec!(input_value))?;
-        
+
         let output = result[0].to_array_view::<f32>()?;
         let embedding = output.iter().copied().collect::<Vec<f32>>();
-        
+
         let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
         Ok(embedding.iter().map(|x| x / norm).collect())
     }

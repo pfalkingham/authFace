@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 tract-onnx = { workspace = true }
+tract-core = { version = "0.21", package = "tract-core" }
 image = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }

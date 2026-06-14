@@ -8,7 +8,7 @@ use std::time::Instant;
 // Correct ioctl numbers from kernel headers (x86_64)
 // NOTE: This module is x86_64-only. ioctl numbers and struct layouts are ABI-dependent.
 // For ARM/aarch64 support, replace with the `v4l` or `v4l2-sys` crates.
-const VIDIOC_S_FMT: u64 = 0xc0d05605;
+const VIDIOC_G_FMT: u64 = 0xc0d05604;
 const VIDIOC_REQBUFS: u64 = 0xc0145608;
 const VIDIOC_QUERYBUF: u64 = 0xc0585609;
 const VIDIOC_QBUF: u64 = 0xc058560f;
@@ -18,7 +18,6 @@ const VIDIOC_STREAMOFF: u64 = 0x40045613;
 
 const V4L2_BUF_TYPE_VIDEO_CAPTURE: u32 = 1;
 const V4L2_MEMORY_MMAP: u32 = 1;
-const V4L2_PIX_FMT_GREY: u32 = 0x59455247; // 'GREY'
 
 // Kernel struct v4l2_format: type(4) + padding(4) + union raw_data[200] = 208 bytes
 #[repr(C)]
@@ -101,15 +100,21 @@ pub struct Camera {
 unsafe impl Send for Camera {}
 
 impl Camera {
-    pub fn open(device_path: &str, width: u32, height: u32) -> Result<Self> {
+    pub fn open(device_path: &str) -> Result<Self> {
         let t0 = Instant::now();
         let fd = open(device_path, OFlag::O_RDWR, Mode::empty())
             .map_err(|e| anyhow::anyhow!("Failed to open {}: {}", device_path, e))?;
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
         eprintln!("TIMING_CAP open: {:?}", t0.elapsed());
 
-        let fmt = make_v4l2_format(V4L2_BUF_TYPE_VIDEO_CAPTURE, width, height, V4L2_PIX_FMT_GREY);
-        ioctl(fd.as_raw_fd(), VIDIOC_S_FMT, &fmt as *const _ as *mut c_void)?;
+        // Query current format instead of setting it.
+        // VIDIOC_S_FMT triggers sensor init on IR cameras (~2s delay).
+        // The camera is already configured correctly, so G_FMT is instant.
+        let mut fmt = make_v4l2_format(V4L2_BUF_TYPE_VIDEO_CAPTURE, 0, 0, 0);
+        ioctl(fd.as_raw_fd(), VIDIOC_G_FMT, &mut fmt as *mut _ as *mut c_void)?;
+        let pix: &v4l2_pix_format = unsafe { &*(fmt.raw.as_ptr() as *const v4l2_pix_format) };
+        let width = pix.width;
+        let height = pix.height;
 
         let mut reqbuf = v4l2_requestbuffers {
             count: 1,
@@ -203,7 +208,7 @@ impl Drop for Camera {
 }
 
 pub fn capture_ir_frame(device_path: &str, timeout_ms: i32) -> Result<IrFrame> {
-    let mut cam = Camera::open(device_path, 640, 400)?;
+    let mut cam = Camera::open(device_path)?;
     let frame = cam.capture_frame(timeout_ms)?;
     cam.stop_stream();
     Ok(frame)
