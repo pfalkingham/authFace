@@ -11,7 +11,6 @@ impl FaceEncoder {
         let model = onnx()
             .model_for_path(model_path)?
             .with_input_fact(0, InferenceFact::dt_shape(f32::datum_type(), tvec!(1, 3, 112, 112)))?
-            .into_optimized()?
             .into_runnable()?;
         Ok(Self { model })
     }
