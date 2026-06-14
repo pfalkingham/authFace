@@ -6,11 +6,13 @@ pub mod preprocess;
 pub mod storage;
 pub mod verify;
 
+pub use crate::capture::Camera;
 pub use crate::config::FaceAuthConfig;
 use crate::inference::FaceEncoder;
 use crate::storage::EmbeddingStore;
 use crate::verify::verify_embedding;
 use anyhow::Result;
+use std::time::Instant;
 
 pub struct FaceAuth {
     config: FaceAuthConfig,
@@ -24,22 +26,35 @@ impl FaceAuth {
     }
     
     pub fn authenticate(&mut self, user: &str) -> Result<bool> {
+        let t0 = Instant::now();
         let frame = crate::capture::capture_ir_frame(&self.config.device(), self.config.capture_timeout_ms())?;
+        eprintln!("TIMING capture: {:?}", t0.elapsed());
+
+        let t1 = Instant::now();
         let mut frame = frame;
         crate::preprocess::histogram_equalize(&mut frame);
         let input = crate::preprocess::preprocess_ir_frame(&frame)?;
+        eprintln!("TIMING preprocess: {:?}", t1.elapsed());
+
+        let t2 = Instant::now();
         let embedding = self.encoder.encode(input.view())?;
-        
+        eprintln!("TIMING encode: {:?}", t2.elapsed());
+
+        let t3 = Instant::now();
         let store = EmbeddingStore::load(user, &self.config.embeddings_dir())?;
-        verify_embedding(&embedding, &store, self.config.threshold())
+        let result = verify_embedding(&embedding, &store, self.config.threshold());
+        eprintln!("TIMING verify: {:?}", t3.elapsed());
+
+        result
     }
     
     pub fn enroll(&mut self, user: &str, frames: usize, interval_ms: u64) -> Result<()> {
         let mut store = EmbeddingStore::default();
+        let mut cam = Camera::open(&self.config.device(), 640, 400)?;
         
         for i in 0..frames {
             println!("Capturing frame {}/{}...", i + 1, frames);
-            let frame = crate::capture::capture_ir_frame(&self.config.device(), self.config.capture_timeout_ms())?;
+            let frame = cam.capture_frame(self.config.capture_timeout_ms())?;
             let mut frame = frame;
             crate::preprocess::histogram_equalize(&mut frame);
             let input = crate::preprocess::preprocess_ir_frame(&frame)?;

@@ -4,12 +4,12 @@ use nix::poll::{PollFd, PollFlags, PollTimeout};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use libc::{c_void, mmap, munmap, PROT_READ, MAP_SHARED, MAP_FAILED};
 use anyhow::Result;
+use std::time::Instant;
 
 // Correct ioctl numbers from kernel headers (x86_64)
 // NOTE: This module is x86_64-only. ioctl numbers and struct layouts are ABI-dependent.
 // For ARM/aarch64 support, replace with the `v4l` or `v4l2-sys` crates.
 const VIDIOC_S_FMT: u64 = 0xc0d05605;
-const VIDIOC_G_FMT: u64 = 0xc0d05604;
 const VIDIOC_REQBUFS: u64 = 0xc0145608;
 const VIDIOC_QUERYBUF: u64 = 0xc0585609;
 const VIDIOC_QBUF: u64 = 0xc058560f;
@@ -90,119 +90,140 @@ pub struct IrFrame {
     pub height: u32,
 }
 
-pub fn capture_ir_frame(device_path: &str, timeout_ms: i32) -> Result<IrFrame> {
-    let fd = open(device_path, OFlag::O_RDWR, Mode::empty())
-        .map_err(|e| anyhow::anyhow!("Failed to open {}: {}", device_path, e))?;
-    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+pub struct Camera {
+    fd: OwnedFd,
+    mmap_ptr: *mut c_void,
+    length: usize,
+    width: u32,
+    height: u32,
+    stream_on: bool,
+}
 
-    let mut fmt = make_v4l2_format(
-        V4L2_BUF_TYPE_VIDEO_CAPTURE,
-        640, 400, V4L2_PIX_FMT_GREY,
-    );
-    ioctl(fd.as_raw_fd(), VIDIOC_S_FMT, &mut fmt as *mut _ as *mut c_void)?;
+unsafe impl Send for Camera {}
 
-    let mut reqbuf = v4l2_requestbuffers {
-        count: 1,
-        type_: V4L2_BUF_TYPE_VIDEO_CAPTURE,
-        memory: V4L2_MEMORY_MMAP,
-        reserved: [0, 0],
-    };
-    ioctl(fd.as_raw_fd(), VIDIOC_REQBUFS, &mut reqbuf as *mut _ as *mut c_void)?;
+impl Camera {
+    pub fn open(device_path: &str, width: u32, height: u32) -> Result<Self> {
+        let t0 = Instant::now();
+        let fd = open(device_path, OFlag::O_RDWR, Mode::empty())
+            .map_err(|e| anyhow::anyhow!("Failed to open {}: {}", device_path, e))?;
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        eprintln!("TIMING_CAP open: {:?}", t0.elapsed());
 
-    let mut buf = v4l2_buffer {
-        index: 0,
-        type_: V4L2_BUF_TYPE_VIDEO_CAPTURE,
-        memory: V4L2_MEMORY_MMAP,
-        ..unsafe { std::mem::zeroed() }
-    };
-    ioctl(fd.as_raw_fd(), VIDIOC_QUERYBUF, &mut buf as *mut _ as *mut c_void)?;
+        let fmt = make_v4l2_format(V4L2_BUF_TYPE_VIDEO_CAPTURE, width, height, V4L2_PIX_FMT_GREY);
+        ioctl(fd.as_raw_fd(), VIDIOC_S_FMT, &fmt as *const _ as *mut c_void)?;
 
-    let length = buf.length as usize;
-    // m union: offset is at bits 0-31, userptr/planes at bits 0-63
-    let offset = buf.m as libc::off_t;
+        let mut reqbuf = v4l2_requestbuffers {
+            count: 1,
+            type_: V4L2_BUF_TYPE_VIDEO_CAPTURE,
+            memory: V4L2_MEMORY_MMAP,
+            reserved: [0, 0],
+        };
+        ioctl(fd.as_raw_fd(), VIDIOC_REQBUFS, &mut reqbuf as *mut _ as *mut c_void)?;
 
-    let mmap_ptr = unsafe {
-        mmap(
-            std::ptr::null_mut(),
-            length,
-            PROT_READ,
-            MAP_SHARED,
-            fd.as_raw_fd(),
-            offset,
-        )
-    };
-
-    if mmap_ptr == MAP_FAILED {
-        return Err(anyhow::anyhow!("mmap failed"));
-    }
-
-    let mut buf = v4l2_buffer {
-        index: 0,
-        type_: V4L2_BUF_TYPE_VIDEO_CAPTURE,
-        memory: V4L2_MEMORY_MMAP,
-        ..unsafe { std::mem::zeroed() }
-    };
-    ioctl(fd.as_raw_fd(), VIDIOC_QBUF, &mut buf as *mut _ as *mut c_void)?;
-    let stream_type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    ioctl(fd.as_raw_fd(), VIDIOC_STREAMON, &stream_type as *const _ as *mut c_void)?;
-
-    let mut frame_data = None;
-
-    // Wait for frame with timeout (poll before DQBUF to avoid blocking forever)
-    let mut poll_fds = [PollFd::new(fd.as_fd(), PollFlags::POLLIN)];
-    let poll_timeout: PollTimeout = if timeout_ms > 0 {
-        PollTimeout::from(timeout_ms as u16)
-    } else {
-        PollTimeout::from(None::<u16>)
-    };
-    match nix::poll::poll(&mut poll_fds, poll_timeout) {
-        Ok(0) => {
-            let _ = ioctl(fd.as_raw_fd(), VIDIOC_STREAMOFF, &stream_type as *const _ as *mut c_void);
-            unsafe { munmap(mmap_ptr, length) };
-            return Err(anyhow::anyhow!("Camera capture timed out after {}ms", timeout_ms));
-        }
-        Ok(_) => {}
-        Err(e) => {
-            let _ = ioctl(fd.as_raw_fd(), VIDIOC_STREAMOFF, &stream_type as *const _ as *mut c_void);
-            unsafe { munmap(mmap_ptr, length) };
-            return Err(anyhow::anyhow!("poll failed: {}", e));
-        }
-    }
-
-    for _ in 0..3 {
         let mut buf = v4l2_buffer {
             index: 0,
             type_: V4L2_BUF_TYPE_VIDEO_CAPTURE,
             memory: V4L2_MEMORY_MMAP,
             ..unsafe { std::mem::zeroed() }
         };
-        if ioctl(fd.as_raw_fd(), VIDIOC_DQBUF, &mut buf as *mut _ as *mut c_void).is_ok() {
-            let bytes_used = buf.bytesused as usize;
-            let data_slice = unsafe { std::slice::from_raw_parts(mmap_ptr as *const u8, bytes_used) };
-            frame_data = Some(data_slice.iter().map(|&b| (b as u16) * 257).collect());
+        ioctl(fd.as_raw_fd(), VIDIOC_QUERYBUF, &mut buf as *mut _ as *mut c_void)?;
 
-            let _ = ioctl(fd.as_raw_fd(), VIDIOC_QBUF, &mut buf as *mut _ as *mut c_void);
-            break;
+        let length = buf.length as usize;
+        let offset = buf.m as libc::off_t;
+
+        let mmap_ptr = unsafe {
+            mmap(
+                std::ptr::null_mut(),
+                length,
+                PROT_READ,
+                MAP_SHARED,
+                fd.as_raw_fd(),
+                offset,
+            )
+        };
+        if mmap_ptr == MAP_FAILED {
+            return Err(anyhow::anyhow!("mmap failed"));
+        }
+
+        Ok(Self { fd, mmap_ptr, length, width, height, stream_on: false })
+    }
+
+    pub fn capture_frame(&mut self, timeout_ms: i32) -> Result<IrFrame> {
+        if !self.stream_on {
+            let buf = v4l2_buffer {
+                index: 0,
+                type_: V4L2_BUF_TYPE_VIDEO_CAPTURE,
+                memory: V4L2_MEMORY_MMAP,
+                ..unsafe { std::mem::zeroed() }
+            };
+            ioctl(self.fd.as_raw_fd(), VIDIOC_QBUF, &buf as *const _ as *mut c_void)?;
+            let stream_type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            ioctl(self.fd.as_raw_fd(), VIDIOC_STREAMON, &stream_type as *const _ as *mut c_void)?;
+            self.stream_on = true;
+        }
+
+        let mut poll_fds = [PollFd::new(self.fd.as_fd(), PollFlags::POLLIN)];
+        let poll_timeout: PollTimeout = if timeout_ms > 0 {
+            PollTimeout::from(timeout_ms as u16)
+        } else {
+            PollTimeout::from(None::<u16>)
+        };
+        match nix::poll::poll(&mut poll_fds, poll_timeout) {
+            Ok(0) => {
+                return Err(anyhow::anyhow!("Camera capture timed out after {}ms", timeout_ms));
+            }
+            Ok(_) => {}
+            Err(e) => {
+                return Err(anyhow::anyhow!("poll failed: {}", e));
+            }
+        }
+
+        let mut frame_data = None;
+        for _ in 0..3 {
+            let mut buf = v4l2_buffer {
+                index: 0,
+                type_: V4L2_BUF_TYPE_VIDEO_CAPTURE,
+                memory: V4L2_MEMORY_MMAP,
+                ..unsafe { std::mem::zeroed() }
+            };
+            if ioctl(self.fd.as_raw_fd(), VIDIOC_DQBUF, &mut buf as *mut _ as *mut c_void).is_ok() {
+                let bytes_used = buf.bytesused as usize;
+                let data_slice = unsafe { std::slice::from_raw_parts(self.mmap_ptr as *const u8, bytes_used) };
+                frame_data = Some(data_slice.iter().map(|&b| (b as u16) * 257).collect());
+
+                let _ = ioctl(self.fd.as_raw_fd(), VIDIOC_QBUF, &mut buf as *mut _ as *mut c_void);
+                break;
+            }
+        }
+
+        if let Some(data) = frame_data {
+            Ok(IrFrame { data, width: self.width, height: self.height })
+        } else {
+            Err(anyhow::anyhow!("Failed to capture frame (timeout)"))
         }
     }
 
-    let stream_type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    let _ = ioctl(fd.as_raw_fd(), VIDIOC_STREAMOFF, &stream_type as *const _ as *mut c_void);
-    unsafe { munmap(mmap_ptr, length) };
-
-    if let Some(data) = frame_data {
-        let mut fmt = make_v4l2_format(V4L2_BUF_TYPE_VIDEO_CAPTURE, 0, 0, 0);
-        let _ = ioctl(fd.as_raw_fd(), VIDIOC_G_FMT, &mut fmt as *mut _ as *mut c_void);
-        let pix: &v4l2_pix_format = unsafe { &*(fmt.raw.as_ptr() as *const v4l2_pix_format) };
-
-        Ok(IrFrame {
-            data,
-            width: pix.width,
-            height: pix.height,
-        })
-    } else {
-        Err(anyhow::anyhow!("Failed to capture frame (timeout)"))
+    fn stop_stream(&mut self) {
+        if self.stream_on {
+            let stream_type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            let _ = ioctl(self.fd.as_raw_fd(), VIDIOC_STREAMOFF, &stream_type as *const _ as *mut c_void);
+            self.stream_on = false;
+        }
     }
+}
+
+impl Drop for Camera {
+    fn drop(&mut self) {
+        self.stop_stream();
+        unsafe { munmap(self.mmap_ptr, self.length) };
+    }
+}
+
+pub fn capture_ir_frame(device_path: &str, timeout_ms: i32) -> Result<IrFrame> {
+    let mut cam = Camera::open(device_path, 640, 400)?;
+    let frame = cam.capture_frame(timeout_ms)?;
+    cam.stop_stream();
+    Ok(frame)
 }
 
 fn ioctl(fd: i32, request: u64, arg: *mut c_void) -> Result<i32> {
