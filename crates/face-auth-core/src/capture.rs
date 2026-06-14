@@ -1,7 +1,6 @@
 use nix::fcntl::{open, OFlag};
 use nix::sys::stat::Mode;
-use nix::poll::{PollFd, PollFlags, PollTimeout};
-use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use libc::{c_void, mmap, munmap, PROT_READ, MAP_SHARED, MAP_FAILED};
 use anyhow::Result;
 use std::time::Instant;
@@ -148,7 +147,7 @@ impl Camera {
         Ok(Self { fd, mmap_ptr, length, width, height, stream_on: false })
     }
 
-    pub fn capture_frame(&mut self, timeout_ms: i32) -> Result<IrFrame> {
+    pub fn capture_frame(&mut self, _timeout_ms: i32) -> Result<IrFrame> {
         if !self.stream_on {
             let buf = v4l2_buffer {
                 index: 0,
@@ -160,22 +159,6 @@ impl Camera {
             let stream_type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
             ioctl(self.fd.as_raw_fd(), VIDIOC_STREAMON, &stream_type as *const _ as *mut c_void)?;
             self.stream_on = true;
-        }
-
-        let mut poll_fds = [PollFd::new(self.fd.as_fd(), PollFlags::POLLIN)];
-        let poll_timeout: PollTimeout = if timeout_ms > 0 {
-            PollTimeout::from(timeout_ms as u16)
-        } else {
-            PollTimeout::from(None::<u16>)
-        };
-        match nix::poll::poll(&mut poll_fds, poll_timeout) {
-            Ok(0) => {
-                return Err(anyhow::anyhow!("Camera capture timed out after {}ms", timeout_ms));
-            }
-            Ok(_) => {}
-            Err(e) => {
-                return Err(anyhow::anyhow!("poll failed: {}", e));
-            }
         }
 
         let mut frame_data = None;

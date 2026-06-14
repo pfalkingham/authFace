@@ -15,5 +15,5 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 serde = { version = "1.0", features = ["derive"] }
-nix = { version = "0.28", features = ["fs", "poll"] }
+nix = { version = "0.28", features = ["fs"] }
 libc = "0.2"
