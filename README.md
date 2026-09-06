@@ -28,6 +28,7 @@ This fork cherry-picks the following improvements on top of upstream:
 | **PAM `quiet` flag** | no `quiet` | Uses `pam_exec.so quiet` to suppress `pam_exec` chatter on the lock screen |
 | **Lock-screen compat** | Only Fedora (`pam_selinux_permit.so` insertion point) | Also handles Ubuntu/Debian `gdm-password` (`#%PAM-1.0` insertion point) |
 | **Model download** | Required `models/version-slim-320.onnx` to be present | `deploy.sh` auto-downloads it from the upstream Ultra-Light detector repo if missing |
+| **Lock screen scan indicator** | None (silent scan) | `face-auth` writes a status file; a GNOME Shell extension renders scanning/ok/fail on the lock screen |
 
 ## Features
 
@@ -260,6 +261,43 @@ If it fails (no match, no camera, timeout), PAM falls through to password prompt
 No `timeout`, `setenv`, or `env_pass` flags are needed — face-auth reads the camera
 (not stdin) and resolves `PAM_USER` via its own fallback chain.
 
+## Lock Screen Scan Indicator (GNOME Shell extension)
+
+By default the scan is silent: `face-auth` runs headless inside PAM, so the only
+feedback is the camera LED. A companion GNOME Shell extension shows live status
+**on the lock screen** while the face is being scanned:
+
+| Status | Indicator |
+|--------|-----------|
+| Scanning | Pulsing pill with camera icon + "Memindai wajah…" |
+| Success | Green check — "Wajah dikenali" (briefly) |
+| Failure | Red error — "Wajah tidak dikenali — gunakan password" |
+
+### How it works
+
+1. `face-auth` (the PAM binary) writes a status file to the authenticated user's
+   runtime directory while it runs: `/run/user/<uid>/face-auth-status` containing
+   `scanning`, then `ok` or `fail`.
+2. The extension (running in your session's lock screen) polls the file every
+   100 ms and renders the indicator above the lock screen UI.
+
+No daemon, no D-Bus server — just a small status file, keeping the zero-footprint
+design of the core.
+
+### Install
+
+```bash
+# Requires GNOME Shell 45+ (Fedora 39+, Bazzite, Bluefin, Silverblue, Kinoite)
+extensions/authface-scan-indicator/install-extension.sh
+# Then: Alt+F2 → r (X11) or log out/in (Wayland)
+```
+
+Everything lives in `~/.local/share/gnome-shell/extensions/` — immutable-friendly.
+
+> **Note:** this shows on the **session lock screen** (Super+L / auto-lock), not
+> on the GDM login/greeter screen. The greeter runs in a separate locked-down
+> shell as the `gdm` user and does not expose hooks for third-party indicators.
+
 ## How It Works
 
 ```
@@ -384,6 +422,11 @@ authFace/
     desktop file + icon      # App launcher assets
   selinux/
     face-auth.te             # SELinux policy source
+  extensions/
+    authface-scan-indicator/ # GNOME Shell lock-screen scan indicator
+      extension.js
+      metadata.json
+      install-extension.sh
   deploy.sh                  # Core auth installer
   deploy-gui.sh              # Optional GUI installer
   uninstall.sh               # Removal script (--gui, --purge flags)

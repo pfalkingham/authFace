@@ -1,0 +1,8 @@
+{
+  "uuid": "authface-scan-indicator@samvivan.local",
+  "name": "authFace Scan Indicator",
+  "description": "Menampilkan indikator status pemindaian wajah authFace di lock screen (scanning/ok/fail).",
+  "shell-version": ["45", "46", "47", "48", "49"],
+  "url": "https://github.com/SamVivan1/authFace",
+  "version-name": "1.0.0"
+}
