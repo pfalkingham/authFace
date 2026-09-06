@@ -34,7 +34,7 @@ fn main() {
     eprintln!("TIMING user_resolve: {:?}", t0.elapsed());
     let t1 = Instant::now();
     
-    let config = match FaceAuthConfig::load() {
+    let config = match FaceAuthConfig::load_for_user(Some(&user)) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Config error: {}", e);

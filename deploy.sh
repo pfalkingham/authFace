@@ -66,15 +66,16 @@ fi
 # ---- Install face detector model ----
 echo "Installing face detector model..."
 DETECTOR_NAME="version-slim-320.onnx"
+DETECTOR_URL="https://raw.githubusercontent.com/Linzaer/Ultra-Light-Fast-Generic-Face-Detector-1MB/master/models/onnx/version-slim-320.onnx"
 if [ -f "$SHARE_DIR/$DETECTOR_NAME" ]; then
     echo "Detector model already installed at $SHARE_DIR/$DETECTOR_NAME"
 elif [ -f "models/$DETECTOR_NAME" ]; then
     install -Dm644 "models/$DETECTOR_NAME" "$SHARE_DIR/$DETECTOR_NAME"
     echo "Installed detector model from models/$DETECTOR_NAME"
 else
-    echo "Error: $DETECTOR_NAME not found in models/"
-    echo "Run inside the dev distrobox: python3 -m onnxsim version-slim-320.onnx version-slim-320.onnx"
-    exit 1
+    echo "Downloading face detector model..."
+    curl -sL -o "$SHARE_DIR/$DETECTOR_NAME" "$DETECTOR_URL"
+    echo "Detector model downloaded and installed"
 fi
 
 echo "Installing config..."
@@ -92,11 +93,16 @@ for service in sudo swaylock gdm-password; do
     sed -i '/pam_exec\.so.*face-auth/d' "$conf"
 
     if [ "$service" = "gdm-password" ]; then
-        # Insert after pam_selinux_permit.so line (lock screen)
-        sed -i '/^auth.*pam_selinux_permit\.so$/a auth       sufficient  pam_exec.so /usr/local/bin/face-auth' "$conf"
+        if grep -q "pam_selinux_permit.so" "$conf"; then
+            # Insert after pam_selinux_permit.so line (Fedora lock screen)
+            sed -i '/^auth.*pam_selinux_permit\.so$/a auth       sufficient  pam_exec.so quiet /usr/local/bin/face-auth' "$conf"
+        else
+            # Insert after #%PAM-1.0 (Ubuntu/Debian lock screen / login)
+            sed -i '/^#%PAM-1\.0/a auth       sufficient  pam_exec.so quiet /usr/local/bin/face-auth' "$conf"
+        fi
     else
         # Insert after #%PAM-1.0 (must remain first line)
-        sed -i '/^#%PAM-1\.0/a auth       sufficient  pam_exec.so /usr/local/bin/face-auth' "$conf"
+        sed -i '/^#%PAM-1\.0/a auth       sufficient  pam_exec.so quiet /usr/local/bin/face-auth' "$conf"
     fi
     echo "Updated $conf (backup at $conf.face-auth.bak)"
 done

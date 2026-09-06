@@ -232,16 +232,23 @@ fn ioctl(fd: i32, request: u64, arg: *mut c_void) -> Result<i32> {
 
 pub fn detect_ir_camera() -> Option<String> {
     let base = std::path::Path::new("/sys/class/video4linux");
+    let mut candidates = Vec::new();
     if let Ok(entries) = std::fs::read_dir(base) {
         for entry in entries.flatten() {
             let name_path = entry.path().join("name");
             if let Ok(name) = std::fs::read_to_string(&name_path) {
                 if name.to_lowercase().contains("ir") || name.to_lowercase().contains("infrared") {
                     if let Some(device_name) = entry.file_name().to_str() {
-                        return Some(format!("/dev/{}", device_name));
+                        candidates.push(format!("/dev/{}", device_name));
                     }
                 }
             }
+        }
+    }
+    candidates.sort();
+    for dev in candidates {
+        if Camera::open(&dev).is_ok() {
+            return Some(dev);
         }
     }
     None

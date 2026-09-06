@@ -419,8 +419,7 @@ fn save_threshold(path: &PathBuf, threshold: f32) {
 /// Only IR cameras are shown; non-IR cameras are excluded since
 /// the capture pipeline expects raw 8-bit greyscale (IR sensor format).
 fn enumerate_cameras() -> (Vec<String>, Vec<String>) {
-    let mut display = Vec::new();
-    let mut paths = Vec::new();
+    let mut candidates = Vec::new();
     if let Ok(entries) = std::fs::read_dir("/sys/class/video4linux") {
         for entry in entries.flatten() {
             let name_path = entry.path().join("name");
@@ -429,13 +428,23 @@ fn enumerate_cameras() -> (Vec<String>, Vec<String>) {
                 if let Some(dev_name) = entry.file_name().to_str() {
                     let dev_path = format!("/dev/{}", dev_name);
                     if name.to_lowercase().contains("ir") || name.to_lowercase().contains("infrared") {
-                        display.push(format!("{} ({})", dev_path, name));
-                        paths.push(dev_path);
+                        candidates.push((dev_path, name));
                     }
                 }
             }
         }
     }
+    candidates.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut display = Vec::new();
+    let mut paths = Vec::new();
+    for (dev_path, name) in candidates {
+        if face_auth_core::capture::Camera::open(&dev_path).is_ok() {
+            display.push(format!("{} ({})", dev_path, name));
+            paths.push(dev_path);
+        }
+    }
+
     if paths.is_empty() {
         display.push("/dev/video0".to_string());
         paths.push("/dev/video0".to_string());

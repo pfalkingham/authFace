@@ -34,6 +34,10 @@ impl Default for FaceAuthConfig {
 
 impl FaceAuthConfig {
     pub fn load() -> anyhow::Result<Self> {
+        Self::load_for_user(None)
+    }
+
+    pub fn load_for_user(user: Option<&str>) -> anyhow::Result<Self> {
         let mut builder = Config::builder();
 
         // System config (lower priority)
@@ -43,11 +47,35 @@ impl FaceAuthConfig {
         }
 
         // User config (higher priority, overrides system)
-        if let Some(config_dir) = dirs::config_dir() {
-            let user_config = config_dir.join("face-auth.toml");
-            if user_config.exists() {
-                builder = builder.add_source(File::from(user_config));
+        let mut user_config_path = None;
+        if let Some(username) = user {
+            if let Ok(output) = std::process::Command::new("getent").arg("passwd").arg(username).output() {
+                if output.status.success() {
+                    if let Ok(line) = String::from_utf8(output.stdout) {
+                        let parts: Vec<&str> = line.trim().split(':').collect();
+                        if parts.len() >= 6 {
+                            let home = PathBuf::from(parts[5]);
+                            let cfg = home.join(".config/face-auth.toml");
+                            if cfg.exists() {
+                                user_config_path = Some(cfg);
+                            }
+                        }
+                    }
+                }
             }
+        }
+
+        if user_config_path.is_none() {
+            if let Some(config_dir) = dirs::config_dir() {
+                let user_config = config_dir.join("face-auth.toml");
+                if user_config.exists() {
+                    user_config_path = Some(user_config);
+                }
+            }
+        }
+
+        if let Some(cfg) = user_config_path {
+            builder = builder.add_source(File::from(cfg));
         }
 
         builder = builder.add_source(Environment::with_prefix("FACE_AUTH"));
