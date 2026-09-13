@@ -1,8 +1,51 @@
 #!/bin/bash
 set -euo pipefail
 
-MODEL_URL="https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_sc.zip"
-MODEL_CHECKSUM="9cc6e4a75f0e2bf0b1aed94578f144d15175f357bdc05e815e5c4a02b319eb4f"
+# ---- Recognition model selection ----
+# Both packs are official InsightFace releases (https://github.com/deepinsight/insightface).
+#   mbf (default): w600k_mbf.onnx, MobileFaceNet, ~13MB  — fastest, lowest accuracy
+#   r50:           w600k_r50.onnx, ResNet50,       ~166MB — slower to download, more discriminative embeddings
+# Both expose the same interface (112x112x3 input, 512-d normalized embedding output), so
+# switching is safe, but embeddings are NOT portable between models — re-run face-enroll
+# after switching.
+MODEL_CHOICE="mbf"
+
+usage() {
+    echo "Usage: sudo ./deploy.sh [--model=mbf|r50]"
+    echo ""
+    echo "  --model=mbf   (default) MobileFaceNet recognition model, ~13MB, fastest"
+    echo "  --model=r50   ResNet50 recognition model, ~166MB, stronger/more discriminative"
+    echo ""
+    echo "  Re-run face-enroll after switching models — embeddings are model-specific."
+}
+
+for arg in "$@"; do
+    case "$arg" in
+        --model=*) MODEL_CHOICE="${arg#*=}" ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "Unknown argument: $arg"; usage; exit 1 ;;
+    esac
+done
+
+case "$MODEL_CHOICE" in
+    mbf)
+        MODEL_PACK_URL="https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_sc.zip"
+        MODEL_PACK_NAME="buffalo_sc.zip"
+        MODEL_NAME="w600k_mbf.onnx"
+        MODEL_CHECKSUM="9cc6e4a75f0e2bf0b1aed94578f144d15175f357bdc05e815e5c4a02b319eb4f"
+        ;;
+    r50)
+        MODEL_PACK_URL="https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip"
+        MODEL_PACK_NAME="buffalo_l.zip"
+        MODEL_NAME="w600k_r50.onnx"
+        MODEL_CHECKSUM="4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43"
+        ;;
+    *)
+        echo "Error: unknown --model value '$MODEL_CHOICE' (expected 'mbf' or 'r50')"
+        usage
+        exit 1
+        ;;
+esac
 
 BIN_DIR="/usr/local/bin"
 SHARE_DIR="/usr/local/share/face-auth"
@@ -40,8 +83,7 @@ install -Dm755 target/x86_64-unknown-linux-musl/release/face-auth "$BIN_DIR/face
 install -Dm755 target/x86_64-unknown-linux-musl/release/face-enroll "$BIN_DIR/face-enroll"
 
 # ---- Install model ----
-echo "Installing model..."
-MODEL_NAME="w600k_mbf.onnx"
+echo "Installing model ($MODEL_CHOICE: $MODEL_NAME)..."
 if [ -f "$SHARE_DIR/$MODEL_NAME" ]; then
     echo "Model already installed at $SHARE_DIR/$MODEL_NAME"
 elif [ -f "models/$MODEL_NAME" ]; then
@@ -50,8 +92,8 @@ elif [ -f "models/$MODEL_NAME" ]; then
 else
     echo "Downloading model from InsightFace..."
     mkdir -p /tmp/face-auth-model
-    curl -L -o /tmp/face-auth-model/buffalo_sc.zip "$MODEL_URL"
-    unzip -o /tmp/face-auth-model/buffalo_sc.zip -d /tmp/face-auth-model/
+    curl -L -o "/tmp/face-auth-model/$MODEL_PACK_NAME" "$MODEL_PACK_URL"
+    unzip -o "/tmp/face-auth-model/$MODEL_PACK_NAME" -d /tmp/face-auth-model/
     echo "Verifying checksum..."
     echo "$MODEL_CHECKSUM  /tmp/face-auth-model/$MODEL_NAME" | sha256sum -c - || {
         echo "Error: Checksum mismatch! The model may be corrupted or tampered."
@@ -79,6 +121,15 @@ fi
 
 echo "Installing config..."
 install -Dm644 config/face-auth.toml.example "$CONFIG_DIR/face-auth.toml"
+
+if [ "$MODEL_CHOICE" != "mbf" ]; then
+    if grep -q '^model_path' "$CONFIG_DIR/face-auth.toml"; then
+        sed -i "s|^model_path.*|model_path = \"$SHARE_DIR/$MODEL_NAME\"|" "$CONFIG_DIR/face-auth.toml"
+    else
+        sed -i "s|^# model_path.*|model_path = \"$SHARE_DIR/$MODEL_NAME\"|" "$CONFIG_DIR/face-auth.toml"
+    fi
+    echo "Set model_path = $SHARE_DIR/$MODEL_NAME in $CONFIG_DIR/face-auth.toml"
+fi
 
 # ---- PAM setup ----
 echo "Installing PAM configs..."
