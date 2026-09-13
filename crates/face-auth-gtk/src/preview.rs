@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use face_auth_core::capture::{capture_ir_frame, IrFrame};
+use face_auth_core::capture::{Camera, IrFrame};
 use face_auth_core::detector::{raw_frame_has_content, FaceDetector};
 use face_auth_core::inference::FaceEncoder;
 use face_auth_core::preprocess::{histogram_equalize, preprocess_ir_frame};
@@ -76,15 +76,29 @@ impl CaptureController {
                 Err(_) => return,
             };
 
+            // Keep a single camera stream open for the life of the preview instead of
+            // reopening (and thus restarting VIDIOC_STREAMON) on every frame — some IR
+            // sensors (e.g. Logitech BRIO) interleave illuminated/dark frames, and a fresh
+            // stream tends to land on the same phase every time, showing an all-black feed.
+            let mut cam = match Camera::open(&device) {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+
             loop {
                 if shutdown.load(Ordering::Relaxed) {
                     break;
                 }
 
-                let frame = match capture_ir_frame(&device, capture_timeout) {
+                let frame = match cam.capture_frame(capture_timeout) {
                     Ok(f) => f,
                     Err(_) => {
+                        // Try to recover from a transient capture error by reopening the device.
                         thread::sleep(Duration::from_millis(100));
+                        cam = match Camera::open(&device) {
+                            Ok(c) => c,
+                            Err(_) => continue,
+                        };
                         continue;
                     }
                 };
