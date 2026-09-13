@@ -154,6 +154,20 @@ sudo ./deploy.sh
 
 Each PAM file is backed up with a `.face-auth.bak` suffix.
 
+#### Choosing a recognition model
+
+By default `deploy.sh` installs `w600k_mbf.onnx` (MobileFaceNet, ~13 MB) — fast and low-overhead.
+For stronger/more discriminative embeddings at the cost of a larger download, pass `--model=r50`
+to use `w600k_r50.onnx` (ResNet50, ~166 MB) instead, from InsightFace's `buffalo_l` pack:
+
+```bash
+sudo ./deploy.sh --model=r50
+```
+
+Both models share the same interface (112×112×3 input, 512-d normalized embedding output), so no
+code changes are needed to switch. Embeddings are **not** portable between models — re-run
+`face-enroll` after switching.
+
 ### GUI (optional settings panel)
 
 ```bash
