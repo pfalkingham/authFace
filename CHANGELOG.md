@@ -2,15 +2,152 @@
 
 ## [Unreleased]
 
+Merges the improvements from the `SamVivan1/authFace` fork and follows them
+with a security pass over the whole tree.
+
+### Security
+
+Three issues combined into a local privilege escalation on a deployed system.
+
+- **Face templates are no longer writable by unprivileged users.**
+  `deploy.sh` set `/var/lib/face-auth` to mode `1777` with user-owned
+  per-account subdirectories. The sticky bit prevents deleting other people's
+  entries but not creating new ones, so any local user could create a template
+  directory for an account that had not enrolled yet — including `root` — and
+  then authenticate as it at the login screen. Equally, because each user owned
+  their own template, code running as them could substitute an attacker's face
+  and escalate through their next `sudo`. The store is now root-owned `0700`
+  with templates at `0600`; `deploy.sh` re-secures an existing store in place,
+  so nobody has to enrol again.
+- **The PAM path no longer trusts user-writable configuration.**
+  `FaceAuthConfig::load_for_auth` reads only `/etc/face-auth.toml`, then applies
+  the user's own config as a strictly narrowing overlay: `threshold` and
+  `detector_threshold` are honoured only if at least as strict as the system
+  value, `device` only if it is a real IR capture device on this machine, and
+  `model_path` / `detector_model_path` / `embeddings_dir` not at all. The
+  environment is ignored entirely. Previously a `~/.config/face-auth.toml` with
+  `threshold = 0.1` and a redirected `embeddings_dir` turned the next `sudo`
+  into root.
+- **Identity comes from `PAM_USER` alone.** The `PAM_USER` → `USER` →
+  `LOGNAME` → `id -un` fallback chain let environment strings decide which
+  template was checked, and under `sudo` the `id -un` branch resolved to
+  `root`. Usernames are now resolved through NSS and validated before becoming
+  a path component, closing a path traversal into an arbitrary embeddings file.
+- **Fixed an arbitrary file write as root** in the fork's new scan-indicator
+  support. `write_status` wrote `/run/user/<uid>/face-auth-status` with
+  `fs::write` while running as root; that directory belongs to the user, so
+  symlinking the status file at, say, `/etc/shadow` had root truncate it on the
+  next unlock. The write now uses `O_NOFOLLOW`.
+- **Refuse face authentication for remote sessions.** If `PAM_RHOST` names a
+  non-local host, `face-auth` declines rather than polling a camera that is
+  physically next to someone else.
+- **Bounded the embedding file.** `count` was read as a `u32` straight from
+  disk and passed to `Vec::with_capacity`, so a crafted file requested ~96 GB.
+  Loads now reject counts above 256, non-finite values, and trailing bytes.
+- **Clamped `bytesused` against the mmap length** in `capture_frame`, the one
+  place external data sizes an `unsafe` slice; an oversized value from a buggy
+  or hostile driver read past the end of the buffer.
+- **Verified the detector model.** `deploy.sh` downloaded it over `curl -sL`
+  with no `-f`, no exit check and no checksum, so an error page could be
+  installed as the model. The URL is now pinned to a commit rather than
+  `master`, and the SHA-256 is checked.
+- **Removed a `/tmp` staging race** in `deploy.sh`: the fixed
+  `/tmp/face-auth-model` path could be pre-created and owned by another user,
+  who could then swap the model between checksum verification and install.
+  Staging now uses `mktemp -d`.
+
+### Added
+
+- `face-auth --verify USER` — verify a stored face without going through PAM
+  (requires root). Used by the GUI's Test button.
+- GUI Enroll / Improve / Test run through `pkexec`, so enrolment against a
+  root-owned store stays a single click.
+- `face_auth_core::user` module: NSS-backed lookup plus username validation.
+- Tests covering the config trust boundary, username validation, embedding
+  file parsing, verification edge cases, IR name matching and frame geometry.
+
 ### Fixed
-- User detection now uses a fallback chain (`PAM_USER` → `USER` → `LOGNAME` → `id -un`), no `setenv`/`env_pass` flags needed
+
+- **The lock-screen indicator never appeared.** The extension tested
+  `Main.sessionMode.currentMode === 'lock'`, but GNOME has no such mode — the
+  shield is `lock-screen` and the unlock prompt is `unlock-dialog`. It also
+  lacked `session-modes` in `metadata.json`, so it was disabled on the lock
+  screen regardless. Both fixed, and the bubble is now actually centred rather
+  than pinned to the left edge.
+- **`"ir"` was matched as a substring** when detecting IR cameras, so
+  "Virtual Camera" (v4l2loopback) and "Logitech BRIO" both registered as IR
+  sensors. Matching is now on word boundaries.
+- **The capture pipeline assumed 8-bit GREY without checking.** Pointed at an
+  RGB webcam it reinterpreted YUYV or MJPEG bytes as greyscale and compared the
+  noise against a real template. `Camera::open` now validates the pixel format
+  and frame geometry and explains the mismatch.
+- `cosine_similarity` silently compared a prefix when the stored and probe
+  embeddings differed in length; the seed of `0.0` also made anti-correlated
+  matches indistinguishable from orthogonal ones.
+- `detect()` panicked on an unexpected detector output shape instead of
+  returning an error — inside PAM.
+- `enroll_append` treated *any* load failure as "nothing enrolled yet" and
+  would overwrite an existing, merely-unreadable template file.
+- `face-enroll --user 0` passed `getent` validation and enrolled into a
+  directory named `0` that authentication never reads. Names now resolve to
+  their canonical form.
+- A failed `VIDIOC_DQBUF` left no queued buffer, so every later poll in a scan
+  window timed out.
+- Frames shorter than `width * height` were zero-padded into a half-black image
+  rather than rejected.
+- `raw_frame_has_content` accumulated variance in `f32` over ~256k large terms,
+  well past its precision; it now uses `f64`.
+- Embedding writes are `fsync`ed before the rename, so a crash cannot leave a
+  present-but-empty template file.
+- GUI config writes are atomic and no longer clobber `detector_threshold` when
+  saving `threshold`.
+- `uninstall.sh` deleted any PAM line containing `face-auth`; it is now
+  anchored to the `pam_exec.so` stanza.
+- `deploy.sh` reports a warning instead of silent success when it cannot find
+  a PAM insertion point, and refuses to run as non-root.
+
+### Changed
+
+- **Enrolment now requires root** (`sudo face-enroll`), a direct consequence of
+  the template store no longer being world-writable. The GUI hides this behind
+  `pkexec`.
+- **The GUI threshold slider starts at the system value**, since a lower one
+  would be ignored at the login prompt.
+- The GUI preview holds the camera open instead of reopening it — full
+  `open`/`G_FMT`/`REQBUFS`/`QUERYBUF`/`mmap`/`STREAMON` — for every frame, and
+  no longer runs the 512-d encoder on each frame only to discard the result.
+  Detection is paced at ~7 Hz while the preview streams at camera rate.
+- GUI helper invocations run off the main loop, so the window no longer freezes
+  for the several seconds an enrolment takes. The preview channel is bounded
+  and drained, so it cannot grow without limit or drift behind.
+- `TIMING`/`SCAN` output on every authentication now goes through `tracing` at
+  debug level instead of `eprintln!` to stderr, where `pam_exec` put it on the
+  terminal for every `sudo`.
+- Config values are range-checked; a `threshold` at or below zero is rejected
+  rather than silently accepting every face.
+- Histogram equalisation tables moved off the stack (512 KB per call).
+- GNOME extension strings are in English and the status file is watched with a
+  `Gio.FileMonitor` rather than polled every 100 ms for the whole session.
+- `README.md` documents the trust model, the narrowing overlay, and the
+  residual risks (no liveness detection, no rate limiting).
+
+### Merged from SamVivan1/authFace
+
+- Open-probe IR camera detection — try each candidate and use the first that
+  actually opens, rather than the first name that matches.
+- Distro-aware `gdm-password` patching for Ubuntu/Debian.
+- `quiet` on the `pam_exec` stanzas.
+- GNOME Shell lock-screen scan indicator.
+
+## [Earlier]
+
+### Fixed
 - Removed `timeout=10` from PAM stanzas (causes pam_exec to block on stdin; face-auth reads the camera, not stdin)
 - `deploy.sh` no longer wipes `/var/lib/face-auth/` on redeploy (preserves enrolled users)
 - Model checksum mismatch now aborts deployment instead of continuing with potentially corrupted model
 - User config (`~/.config/face-auth.toml`) now correctly overrides system config (`/etc/face-auth.toml`)
 - `face-enroll` validates that the target user exists before attempting enrollment
 - Camera buffer mmap changed to `PROT_READ` only (principle of least privilege)
-- Pinned `image` crate to `0.25.4` (addresses known soundness issues in 0.25.x)
 
 ### Added
 - `uninstall.sh --purge` flag to optionally remove user embeddings

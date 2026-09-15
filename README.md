@@ -16,19 +16,32 @@
 - **GUI settings panel** (optional GTK4 app) for camera selection and enrollment
 - **Immutable-first** — everything fits in `/usr/local` and `~/.local`, no `/usr` modifications needed
 
-## Fork Changes (vs. upstream)
+## Upstream Merges & Security Pass
 
-This fork cherry-picks the following improvements on top of upstream:
+Improvements merged from [SamVivan1/authFace](https://github.com/SamVivan1/authFace):
 
-| Change | Upstream | This fork |
-|--------|----------|-----------|
-| **Multi-IR-camera support** | Returns the *first* IR device found in `/sys/class/video4linux` | Collects **all** IR devices, sorts them, then returns the **first one that actually opens** (`Camera::open` succeeds) |
-| **Per-user config** | Always reads `~/.config/face-auth.toml` from `dirs::config_dir()` | Adds `FaceAuthConfig::load_for_user(user)` — resolves the correct `$HOME` via `getent passwd <user>` so each PAM-authenticated user gets **their own** config |
-| **GTK camera picker** | Lists IR devices without checking they open | Pre-filters the list to cameras that can actually be opened |
-| **PAM `quiet` flag** | no `quiet` | Uses `pam_exec.so quiet` to suppress `pam_exec` chatter on the lock screen |
-| **Lock-screen compat** | Only Fedora (`pam_selinux_permit.so` insertion point) | Also handles Ubuntu/Debian `gdm-password` (`#%PAM-1.0` insertion point) |
-| **Model download** | Required `models/version-slim-320.onnx` to be present | `deploy.sh` auto-downloads it from the upstream Ultra-Light detector repo if missing |
-| **Lock screen scan indicator** | None (silent scan) | `face-auth` writes a status file; a GNOME Shell extension renders scanning/ok/fail on the lock screen |
+| Change | Before | Now |
+|--------|--------|-----|
+| **Multi-IR-camera support** | Returned the *first* IR-named device in `/sys/class/video4linux` | Collects all IR candidates and uses the first that **actually opens** as a GREY capture device |
+| **Distro-aware PAM** | Only Fedora (`pam_selinux_permit.so` insertion point) | Also handles Ubuntu/Debian `gdm-password` (`#%PAM-1.0`) |
+| **PAM `quiet` flag** | no `quiet` | `pam_exec.so quiet` suppresses `pam_exec` chatter |
+| **Detector model download** | Required `models/version-slim-320.onnx` to be present | `deploy.sh` fetches it (now pinned to a commit and SHA-256 verified) |
+| **Lock screen scan indicator** | None (silent scan) | `face-auth` writes a status file; a GNOME Shell extension renders scanning/ok/fail |
+
+Followed by a security pass over the whole tree — see [CHANGELOG.md](CHANGELOG.md)
+for the full list. The changes that affect how you use it:
+
+- **Enrolment needs root** (`sudo face-enroll`, or one click in the GUI via
+  `pkexec`). Face templates are authentication data; when the store was
+  world-writable, any local user could enrol a face for an account that had not
+  enrolled yet, then log in as it.
+- **The login prompt trusts only `/etc/face-auth.toml`.** Your own config can
+  make matching stricter, never looser. See [Configuration](#configuration).
+- **`face-auth` requires `PAM_USER`** rather than falling back to `USER`,
+  `LOGNAME` or `id -un`, and refuses remote (`PAM_RHOST`) sessions.
+
+Upgrading re-secures an existing template store in place, so **no re-enrolment
+is needed**.
 
 ## Features
 
@@ -47,11 +60,11 @@ This fork cherry-picks the following improvements on top of upstream:
 # 1. Install core authentication (PAM, models, binaries)
 sudo ./deploy.sh
 
-# 2. Enroll your face
-face-enroll --user $USER
+# 2. Enroll your face (templates are root-owned, so this needs sudo)
+sudo face-enroll --user $USER
 
 # 3. Test sudo
-sudo true              # triggers IR camera → exit 0
+sudo -k && sudo true   # triggers IR camera → exit 0
 
 # 4. (Optional) Install the settings GUI
 sudo ./deploy-gui.sh
@@ -207,14 +220,36 @@ Restores PAM backups, removes binaries, models, config, SELinux policy, desktop 
 
 ## Configuration
 
-Priority (highest first):
+The authentication path and the unprivileged tools trust different things.
 
-1. **Environment variables**: `FACE_AUTH_DEVICE`, `FACE_AUTH_THRESHOLD`, `FACE_AUTH_MODEL_PATH`, `FACE_AUTH_EMBEDDINGS_DIR`, `FACE_AUTH_CAPTURE_TIMEOUT`
-2. **User config**: `~/.config/face-auth.toml`
-3. **System config**: `/etc/face-auth.toml`
-4. **Defaults**: auto-detected camera, threshold 0.6, 5s capture timeout
+**During PAM authentication** (`face-auth`, i.e. sudo / lock screen / login):
 
-> **Per-user config (fork feature):** `face-auth` (the PAM binary) now resolves the user via `getent passwd $PAM_USER` and reads **that user's** `~/.config/face-auth.toml`. This means two users on the same machine can each have their own camera device and threshold. Non-PAM callers (e.g. the GUI) fall back to `dirs::config_dir()`.
+| Source | Effect |
+|--------|--------|
+| `/etc/face-auth.toml` (root-owned) | Authoritative for everything |
+| `~/.config/face-auth.toml` | May only make authentication **stricter** — see below |
+| `FACE_AUTH_*` environment | **Ignored entirely** |
+
+**For `face-enroll` and the settings GUI**, the usual layering applies:
+environment variables, then `~/.config/face-auth.toml`, then `/etc/face-auth.toml`.
+
+### What a user may override at the login prompt
+
+A user's own config is read (resolved via `getent passwd`, so it is *their* home
+and not whoever happened to invoke the PAM stack), but it is applied as a
+narrowing overlay:
+
+| Key | At the login prompt |
+|-----|--------------------|
+| `threshold`, `detector_threshold` | Honoured only if **>= the system value**. A lower number is ignored. |
+| `device` | Honoured only if the path is a real IR capture device on this machine (IR-looking sysfs name, opens as GREY). |
+| `scan_duration_ms`, `scan_interval_ms`, `capture_timeout_ms` | Honoured within built-in bounds. |
+| `model_path`, `detector_model_path`, `embeddings_dir` | **Ignored** — system policy only. |
+
+This is what stops code running as you — which does not know your password —
+from writing a permissive `~/.config/face-auth.toml` and turning your next
+`sudo` into a root shell. To *loosen* matching, edit `/etc/face-auth.toml` as
+root; the GUI's slider starts at the system value for the same reason.
 
 Example `/etc/face-auth.toml`:
 ```toml
@@ -225,23 +260,40 @@ embeddings_dir = "/var/lib/face-auth"
 capture_timeout_ms = 5000
 ```
 
-> **One user, multiple cameras fallback:** with no `device` set and multiple IR cameras present, the fork tries each candidate in order and uses the first one that actually opens (`/dev/video0` → `/dev/video1` → …). Set `device` explicitly to pin a camera.
+Environment variable names follow the field names, so the capture timeout is
+`FACE_AUTH_CAPTURE_TIMEOUT_MS` (not `FACE_AUTH_CAPTURE_TIMEOUT`).
 
-The GUI automatically writes camera and threshold changes to `~/.config/face-auth.toml`.
+> **Multiple cameras:** with no `device` set, each IR candidate is opened in
+> turn and the first one that works is used. Set `device` explicitly to pin one.
+
+The GUI writes camera and threshold changes to `~/.config/face-auth.toml`.
 
 ## Enrollment
 
+Face templates live in a root-owned directory (`/var/lib/face-auth`, mode
+`0700`), so enrolment is a privileged operation:
+
 ```bash
-# Replace existing embeddings with new capture
-face-enroll --user $USER
+# Replace existing embeddings with a new capture
+sudo face-enroll --user $USER
 
 # Append new embeddings to improve recognition across lighting/angles
-face-enroll --improve --user $USER
+sudo face-enroll --improve --user $USER
 ```
 
-CLI options: `--frames`, `--interval`, `--device`, `--threshold`, `--model`, `--improve`, `-v`.
+CLI options: `--frames`, `--interval`, `--device`, `--threshold`, `--model`,
+`--embeddings-dir`, `--improve`, `-v`.
 
-The GUI's **Enroll Face** button replaces embeddings; **Improve Matching** appends to them.
+The GUI's **Enroll Face**, **Improve Matching** and **Test Authentication**
+buttons run the same helpers through `pkexec`, so you get a graphical
+authentication prompt instead of a terminal. polkit's default for
+`org.freedesktop.policykit.exec` is `auth_admin_keep`, so consecutive actions
+within a few minutes will not re-prompt.
+
+Why this is not user-writable: whatever can write a face template decides whose
+face unlocks that account. If your own login could rewrite it, then so could
+anything running as you, and a stolen browser session would become a root
+shell at the next `sudo`.
 
 ## PAM Integration
 
@@ -269,17 +321,21 @@ feedback is the camera LED. A companion GNOME Shell extension shows live status
 
 | Status | Indicator |
 |--------|-----------|
-| Scanning | Pulsing pill with camera icon + "Memindai wajah…" |
-| Success | Green check — "Wajah dikenali" (briefly) |
-| Failure | Red error — "Wajah tidak dikenali — gunakan password" |
+| Scanning | Pulsing pill with camera icon + "Scanning face…" |
+| Success | Green check — "Face recognised" (briefly) |
+| Failure | Red error — "Face not recognised — use your password" |
 
 ### How it works
 
 1. `face-auth` (the PAM binary) writes a status file to the authenticated user's
    runtime directory while it runs: `/run/user/<uid>/face-auth-status` containing
    `scanning`, then `ok` or `fail`.
-2. The extension (running in your session's lock screen) polls the file every
-   100 ms and renders the indicator above the lock screen UI.
+2. The extension watches that file with a `Gio.FileMonitor` while the unlock
+   UI is on screen, and renders the indicator above it.
+
+   The file is written with `O_NOFOLLOW` because `face-auth` runs as root and
+   the runtime directory belongs to the user — otherwise a symlink there would
+   aim a root write at any file on the system.
 
 No daemon, no D-Bus server — just a small status file, keeping the zero-footprint
 design of the core.
@@ -305,7 +361,9 @@ PAM (sudo / gdm-password / swaylock)
   │
   ▼
 face-auth (static binary)
-  ├─ Resolve PAM_USER → per-user config (fork: getent passwd)
+  ├─ Resolve PAM_USER via getent (refuses to guess from USER/LOGNAME)
+  ├─ Refuse if PAM_RHOST names a remote host
+  ├─ Load /etc/face-auth.toml + strictly-narrowing user overlay
   ├─ V4L2 capture from IR camera (640×400 GREY, auto-detected /dev/videoN)
   │   └─ poll() with 5s timeout — exits cleanly if camera hangs
   ├─ Histogram equalization
@@ -355,8 +413,8 @@ ls /sys/class/video4linux/*/name
 # Grant video group access (log out/in after)
 sudo usermod -aG video $USER
 
-# Debug output
-RUST_LOG=face_auth_core=debug sudo -k && sudo true
+# Debug output from a live sudo attempt
+sudo -k; RUST_LOG=face_auth_core=debug,face_auth=debug sudo true
 
 # Check PAM logs
 journalctl | grep -i "pam_exec\|face-auth"
@@ -364,38 +422,80 @@ journalctl | grep -i "pam_exec\|face-auth"
 # SELinux denials
 journalctl -k | grep face-auth | grep denied
 
-# Test binary directly (skips PAM)
-sudo env PAM_USER=$USER USER=$USER HOME=$HOME /usr/local/bin/face-auth
-echo $?   # 0 = success, 1 = failure
+# Test a stored face directly (skips PAM; needs root to read templates)
+sudo face-auth --verify $USER
+echo $?   # 0 = match, 1 = no match, 2 = error
 
-# Increase capture timeout (default 5000ms)
-FACE_AUTH_CAPTURE_TIMEOUT=10000 sudo -k && sudo true
+# Raise the capture timeout (note the _MS suffix)
+FACE_AUTH_CAPTURE_TIMEOUT_MS=10000 sudo face-auth --verify $USER
 
 # GUI not launching from app menu?
 face-auth-gtk    # run from terminal to see errors
 ```
 
+### "PAM_USER is not set"
+
+`face-auth` no longer guesses the account from `USER`/`LOGNAME`. If you are
+invoking it by hand, use `--verify` rather than setting `PAM_USER` yourself.
+
+### "reports pixel format ... requires raw 8-bit GREY"
+
+The selected device is not an IR sensor — it is an ordinary RGB webcam, or the
+metadata node that sits next to the real capture node. Let auto-detection pick
+one, or check `v4l2-ctl --device /dev/videoN --list-formats`.
+
 ### Multi-camera picks the wrong device / no device selected
 
 ```bash
 # See which IR device is detected
-sudo env PAM_USER=$USER face-auth -v
+sudo face-auth --verify $USER   # with RUST_LOG=face_auth_core=debug
 
-# Pin a specific camera in per-user config
+# Pin a specific camera in your own config (must be a real IR device)
 echo 'device = "/dev/video2"' >> ~/.config/face-auth.toml
 ```
 
+### My threshold change did nothing
+
+A user config may only make matching *stricter*. To loosen it, lower
+`threshold` in `/etc/face-auth.toml` as root — see [Configuration](#configuration).
+
 ## Security & Limitations
 
-- **IR-only, no liveness detection:** Uses IR camera (not RGB), which resists casual
-  photo spoofing. Does not perform structured-light or dot-projection depth checks.
-  High-quality IR-transparent prints or 3D masks may bypass verification.
-- **SELinux policy scope:** The lock-screen policy grants `xdm_t` mmap access to all
-  V4L2 devices. This is a trade-off for drop-in compatibility; narrowing it requires
-  custom udev device types.
-- **x86_64 only:** V4L2 ioctl numbers and struct layouts are hardcoded for x86_64.
+### Trust model
+
+- **Face templates are root-owned.** `/var/lib/face-auth` is mode `0700`,
+  root:root, with templates at `0600`. Whatever can write a template decides
+  whose face unlocks that account, so enrolment goes through `sudo`/`pkexec`.
+- **The PAM path trusts only `/etc/face-auth.toml`.** A user's own config may
+  make matching stricter, never looser, and may not redirect the model or
+  template paths. `FACE_AUTH_*` environment variables are ignored during
+  authentication. See [Configuration](#configuration).
+- **Identity comes from `PAM_USER` only.** `face-auth` refuses to run if PAM
+  did not set it, rather than falling back to `USER`, `LOGNAME` or `id -un`.
+- **Remote sessions are refused.** If `PAM_RHOST` names a non-local host,
+  face authentication is declined — the camera is at the console, so otherwise
+  whoever is sitting at the desk would authenticate an SSH session.
+
+### Known limitations
+
+- **IR-only, no liveness detection:** an IR camera resists casual photo
+  spoofing, but there is no structured-light or dot-projection depth check.
+  A high-quality IR-visible print or a 3D mask may bypass verification. This is
+  the main residual risk and it is inherent to the approach — treat face unlock
+  as a convenience over a password you still have, not as a stronger factor.
+- **No rate limiting or lockout.** Every prompt allows a fresh scan window.
+  PAM's own `pam_faildelay`/`pam_tally2` are not wired up.
+- **`sufficient` bypasses the rest of the auth stack.** A successful match
+  satisfies authentication outright; any other `auth` module below the
+  face-auth line is skipped. That is the point, but it means the strength of
+  the whole stack becomes the strength of the face match.
+- **SELinux policy scope:** the lock-screen policy grants `xdm_t` mmap access
+  to all V4L2 devices. A trade-off for drop-in compatibility; narrowing it
+  requires custom udev device types.
+- **x86_64 only:** V4L2 ioctl numbers and struct layouts are hardcoded.
   ARM/aarch64 requires switching to the `v4l` crate.
-- **Model integrity:** `deploy.sh` verifies SHA-256 checksum and aborts on mismatch.
+- **Model integrity:** both ONNX models are pinned by SHA-256 and the detector
+  URL is pinned to a commit, not a branch. `deploy.sh` aborts on mismatch.
 
 ## Project Structure
 
@@ -405,13 +505,14 @@ authFace/
     face-auth-core/          # Core library
       src/
         capture.rs           # V4L2 capture + poll() timeout + IR camera auto-detect
-        config.rs            # Layered config (system → user → env) + per-user load
+        config.rs            # Layered config + narrowing overlay for PAM + per-user load
         detector.rs          # Face detection (RetinaFace-based ONNX model)
         error.rs             # Error types
         inference.rs         # tract-onnx model loading + encoding
         lib.rs               # FaceAuth struct, auth + enroll + scan
         preprocess.rs        # Histogram equalize, resize, normalize
-        storage.rs           # Binary embedding I/O (versioned, atomic)
+        storage.rs           # Binary embedding I/O (versioned, atomic, 0600)
+        user.rs              # NSS lookup + username validation
         verify.rs            # Cosine similarity
     face-auth/               # PAM binary (stdin-less, PAM_USER fallback)
     face-enroll/             # Enrollment CLI

@@ -16,6 +16,7 @@ models/
 
 # Cache
 .cache/
+.local/
 
 # Editor temp files
 .DS_Store

@@ -1,5 +1,6 @@
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gtk4::prelude::*;
@@ -7,20 +8,26 @@ use gtk4::{gdk, glib};
 use libadwaita::prelude::*;
 
 mod preview;
-use preview::CaptureController;
+use preview::{CaptureController, PreviewEvent};
 
 const APP_ID: &str = "com.github.pfalkingham.face-auth-gtk";
+const ENROLL_FRAMES: usize = 5;
+
+// Absolute paths: pkexec resolves a bare name against the *caller's* PATH, and
+// these always install to /usr/local/bin even when the GUI itself went to
+// ~/.local/bin on an immutable system.
+const FACE_ENROLL_BIN: &str = "/usr/local/bin/face-enroll";
+const FACE_AUTH_BIN: &str = "/usr/local/bin/face-auth";
 
 struct GuiState {
     controller: RefCell<CaptureController>,
     picture: gtk4::Picture,
     status_label: gtk4::Label,
-    device_row: libadwaita::ComboRow,
     camera_paths: Vec<String>,
-    threshold_adj: gtk4::Adjustment,
     threshold_label: gtk4::Label,
     config_path: PathBuf,
     toast_overlay: libadwaita::ToastOverlay,
+    username: String,
 }
 
 fn main() -> glib::ExitCode {
@@ -33,8 +40,21 @@ fn main() -> glib::ExitCode {
 }
 
 fn build_ui(app: &libadwaita::Application) {
-    let config = load_config();
+    let config = face_auth_core::FaceAuthConfig::load().unwrap_or_default();
     let config_path = config_path();
+
+    // The authentication path will not accept a threshold looser than the
+    // system one, so the slider starts there rather than letting someone pick
+    // a value that silently does nothing at the login screen.
+    let system_floor = system_threshold_floor();
+
+    let username = match face_auth_core::user::current() {
+        Ok(info) => info.name,
+        Err(e) => {
+            eprintln!("cannot determine the current user: {e}");
+            String::new()
+        }
+    };
 
     let picture = gtk4::Picture::builder()
         .halign(gtk4::Align::Fill)
@@ -44,14 +64,13 @@ fn build_ui(app: &libadwaita::Application) {
         .build();
 
     let status_label = gtk4::Label::builder()
-        .label("No camera feed")
+        .label("Starting camera…")
         .css_classes(vec!["title-4".to_string()])
         .halign(gtk4::Align::Center)
+        .wrap(true)
         .build();
 
-    let preview_overlay = gtk4::Overlay::builder()
-        .child(&picture)
-        .build();
+    let preview_overlay = gtk4::Overlay::builder().child(&picture).build();
     preview_overlay.add_overlay(&status_label);
     status_label.set_valign(gtk4::Align::End);
     status_label.set_margin_bottom(12);
@@ -62,29 +81,41 @@ fn build_ui(app: &libadwaita::Application) {
         .vexpand(true)
         .build();
 
-    let (camera_display, camera_paths) = enumerate_cameras();
+    let cameras = face_auth_core::capture::enumerate_ir_cameras();
+    let (camera_display, camera_paths): (Vec<String>, Vec<String>) = if cameras.is_empty() {
+        (vec!["No IR camera found".to_string()], vec![config.device()])
+    } else {
+        cameras
+            .iter()
+            .map(|(path, name)| (format!("{path} ({name})"), path.clone()))
+            .unzip()
+    };
     let camera_refs: Vec<&str> = camera_display.iter().map(|s| s.as_str()).collect();
     let camera_store = gtk4::StringList::new(&camera_refs);
     let current_device = config.device();
-    let device_index = camera_paths.iter().position(|d| *d == current_device).unwrap_or(0);
+    let device_index = camera_paths
+        .iter()
+        .position(|d| *d == current_device)
+        .unwrap_or(0);
 
     let device_row = libadwaita::ComboRow::builder()
         .title("Camera")
-        .subtitle("IR camera device")
+        .subtitle("IR camera used for face unlock")
         .model(&camera_store)
         .selected(device_index as u32)
         .build();
 
+    let initial_threshold = config.threshold().max(system_floor);
     let threshold_adj = gtk4::Adjustment::builder()
-        .lower(0.1)
+        .lower(system_floor as f64)
         .upper(0.95)
         .step_increment(0.01)
         .page_increment(0.1)
-        .value(config.threshold() as f64)
+        .value(initial_threshold as f64)
         .build();
 
     let threshold_label = gtk4::Label::builder()
-        .label(format!("{:.2}", config.threshold()))
+        .label(format!("{initial_threshold:.2}"))
         .width_chars(4)
         .build();
 
@@ -102,7 +133,10 @@ fn build_ui(app: &libadwaita::Application) {
 
     let threshold_row = libadwaita::ActionRow::builder()
         .title("Similarity Threshold")
-        .subtitle("Higher = stricter match")
+        .subtitle(format!(
+            "Higher = stricter. System minimum is {system_floor:.2}; edit {} as root to go lower.",
+            face_auth_core::config::SYSTEM_CONFIG_PATH
+        ))
         .activatable_widget(&scale)
         .build();
     threshold_row.add_suffix(&threshold_box);
@@ -110,15 +144,17 @@ fn build_ui(app: &libadwaita::Application) {
     let enroll_button = gtk4::Button::builder()
         .label("Enroll Face")
         .css_classes(vec!["suggested-action".to_string()])
+        .tooltip_text("Replace your stored face with a fresh capture")
         .build();
 
     let improve_button = gtk4::Button::builder()
         .label("Improve Matching")
-        .tooltip_text("Append new embeddings to improve recognition")
+        .tooltip_text("Append new captures to improve recognition")
         .build();
 
     let test_button = gtk4::Button::builder()
         .label("Test Authentication")
+        .tooltip_text("Check your stored face against the camera")
         .build();
 
     let button_box = gtk4::Box::builder()
@@ -154,9 +190,7 @@ fn build_ui(app: &libadwaita::Application) {
         .maximum_size(600)
         .build();
 
-    let toolbar_view = libadwaita::ToolbarView::builder()
-        .content(&clamp)
-        .build();
+    let toolbar_view = libadwaita::ToolbarView::builder().content(&clamp).build();
 
     let header = libadwaita::HeaderBar::builder()
         .title_widget(&gtk4::Label::new(Some("Face Authentication")))
@@ -171,26 +205,30 @@ fn build_ui(app: &libadwaita::Application) {
         .build();
 
     let controller = CaptureController::new(
-        &config.model_path(),
         &config.detector_model_path(),
         config.detector_threshold(),
         &config.device(),
-        config.capture_timeout_ms(),
     );
 
     let state = Rc::new(GuiState {
         controller: RefCell::new(controller),
         picture,
         status_label,
-        device_row,
         camera_paths,
-        threshold_adj,
         threshold_label,
         config_path,
         toast_overlay,
+        username,
     });
 
-    setup_callbacks(&state, &enroll_button, &improve_button, &test_button);
+    setup_callbacks(
+        &state,
+        &device_row,
+        &threshold_adj,
+        &enroll_button,
+        &improve_button,
+        &test_button,
+    );
     state.controller.borrow_mut().start();
 
     let state_clone = state.clone();
@@ -202,83 +240,175 @@ fn build_ui(app: &libadwaita::Application) {
     window.present();
 }
 
-fn setup_callbacks(state: &Rc<GuiState>, enroll_button: &gtk4::Button, improve_button: &gtk4::Button, test_button: &gtk4::Button) {
+fn setup_callbacks(
+    state: &Rc<GuiState>,
+    device_row: &libadwaita::ComboRow,
+    threshold_adj: &gtk4::Adjustment,
+    enroll_button: &gtk4::Button,
+    improve_button: &gtk4::Button,
+    test_button: &gtk4::Button,
+) {
     let s = state.clone();
-    state.device_row.connect_selected_notify(move |row| {
+    device_row.connect_selected_notify(move |row| {
         let idx = row.selected() as usize;
-        if let Some(device) = s.camera_paths.get(idx) {
-            s.controller.borrow_mut().set_device(device);
-            save_device(&s.config_path, device);
+        if let Some(device) = s.camera_paths.get(idx).cloned() {
+            s.controller.borrow_mut().set_device(&device);
+            if let Err(e) = save_setting(&s.config_path, "device", &format!("{device:?}")) {
+                show_toast(&s, &format!("Could not save camera: {e}"));
+            }
         }
     });
 
     let s = state.clone();
-    state.threshold_adj.connect_value_changed(move |adj| {
+    threshold_adj.connect_value_changed(move |adj| {
         let val = adj.value() as f32;
-        s.threshold_label.set_text(&format!("{:.2}", val));
-        save_threshold(&s.config_path, val);
+        s.threshold_label.set_text(&format!("{val:.2}"));
+        if let Err(e) = save_setting(&s.config_path, "threshold", &format!("{val:.2}")) {
+            show_toast(&s, &format!("Could not save threshold: {e}"));
+        }
     });
 
-    let s = state.clone();
-    enroll_button.connect_clicked(move |btn| {
-        btn.set_sensitive(false);
-        btn.set_label("Enrolling...");
-        let s = s.clone();
-        let btn = btn.clone();
-        glib::MainContext::default().spawn_local(async move {
-            s.controller.borrow_mut().stop();
-            let result = run_enroll();
-            match result {
-                Ok(n) => show_toast(&s, &format!("Enrolled {} frames", n)),
-                Err(e) => show_toast(&s, &format!("Enrollment failed: {}", e)),
+    connect_privileged_action(
+        state,
+        enroll_button,
+        "Enroll Face",
+        "Enrolling…",
+        PrivilegedAction::Enroll,
+    );
+    connect_privileged_action(
+        state,
+        improve_button,
+        "Improve Matching",
+        "Improving…",
+        PrivilegedAction::Improve,
+    );
+    connect_privileged_action(
+        state,
+        test_button,
+        "Test Authentication",
+        "Testing…",
+        PrivilegedAction::Test,
+    );
+}
+
+#[derive(Clone, Copy)]
+enum PrivilegedAction {
+    Enroll,
+    Improve,
+    Test,
+}
+
+impl PrivilegedAction {
+    /// Build the `pkexec` command line. Enrolment writes, and verification
+    /// reads, a root-owned template store, so all three need privilege.
+    fn command(self, user: &str) -> Vec<String> {
+        match self {
+            PrivilegedAction::Enroll => vec![
+                FACE_ENROLL_BIN.into(),
+                "--user".into(),
+                user.into(),
+                "--frames".into(),
+                ENROLL_FRAMES.to_string(),
+            ],
+            PrivilegedAction::Improve => vec![
+                FACE_ENROLL_BIN.into(),
+                "--user".into(),
+                user.into(),
+                "--frames".into(),
+                ENROLL_FRAMES.to_string(),
+                "--improve".into(),
+            ],
+            PrivilegedAction::Test => vec![FACE_AUTH_BIN.into(), "--verify".into(), user.into()],
+        }
+    }
+
+    fn describe(self, status: std::process::ExitStatus, stderr: &str) -> String {
+        let code = status.code().unwrap_or(-1);
+        match (self, code) {
+            (PrivilegedAction::Test, 0) => "Face matched".to_string(),
+            (PrivilegedAction::Test, 1) => "No match — face not recognised".to_string(),
+            (PrivilegedAction::Enroll, 0) => format!("Enrolled {ENROLL_FRAMES} frames"),
+            (PrivilegedAction::Improve, 0) => "Added new captures".to_string(),
+            // 126 and 127 are pkexec's "declined" and "not found".
+            (_, 126) => "Cancelled — administrator authentication required".to_string(),
+            (_, 127) => "pkexec or the helper binary was not found".to_string(),
+            _ => {
+                let detail = stderr.lines().last().unwrap_or("").trim();
+                if detail.is_empty() {
+                    format!("Failed (exit {code})")
+                } else {
+                    detail.to_string()
+                }
             }
-            s.controller.borrow_mut().start();
-            btn.set_sensitive(true);
-            btn.set_label("Enroll Face");
+        }
+    }
+}
+
+/// Wire a button to a `pkexec` helper invocation.
+///
+/// The work runs on its own thread: `Command::output()` on the main loop froze
+/// the window for as long as the camera took, which for a five-frame enrolment
+/// is several seconds.
+fn connect_privileged_action(
+    state: &Rc<GuiState>,
+    button: &gtk4::Button,
+    idle_label: &'static str,
+    busy_label: &'static str,
+    action: PrivilegedAction,
+) {
+    let s = state.clone();
+    button.connect_clicked(move |btn| {
+        if s.username.is_empty() {
+            show_toast(&s, "Cannot determine the current user");
+            return;
+        }
+        btn.set_sensitive(false);
+        btn.set_label(busy_label);
+
+        // Release the camera so the helper can open it.
+        s.controller.borrow_mut().stop();
+        s.status_label.set_text("Camera in use by helper…");
+
+        let args = action.command(&s.username);
+        let (tx, rx) = async_channel::bounded(1);
+
+        std::thread::spawn(move || {
+            let result = std::process::Command::new("pkexec").args(&args).output();
+            let _ = tx.send_blocking(result);
         });
-    });
 
-    let s = state.clone();
-    improve_button.connect_clicked(move |btn| {
-        btn.set_sensitive(false);
-        btn.set_label("Improving...");
         let s = s.clone();
         let btn = btn.clone();
-        glib::MainContext::default().spawn_local(async move {
-            s.controller.borrow_mut().stop();
-            let result = run_improve();
-            match result {
-                Ok(n) => show_toast(&s, &format!("Added {} new embeddings", n)),
-                Err(e) => show_toast(&s, &format!("Improve failed: {}", e)),
-            }
+        glib::spawn_future_local(async move {
+            let message = match rx.recv().await {
+                Ok(Ok(output)) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    action.describe(output.status, &stderr)
+                }
+                Ok(Err(e)) => format!("Could not run pkexec: {e}"),
+                Err(_) => "Helper produced no result".to_string(),
+            };
+            show_toast(&s, &message);
             s.controller.borrow_mut().start();
             btn.set_sensitive(true);
-            btn.set_label("Improve Matching");
-        });
-    });
-
-    let s = state.clone();
-    test_button.connect_clicked(move |btn| {
-        btn.set_sensitive(false);
-        btn.set_label("Testing...");
-        let s = s.clone();
-        let btn = btn.clone();
-        glib::MainContext::default().spawn_local(async move {
-            s.controller.borrow_mut().stop();
-            let result = run_test_auth();
-            match result {
-                Ok(msg) => show_toast(&s, &msg),
-                Err(e) => show_toast(&s, &e),
-            }
-            s.controller.borrow_mut().start();
-            btn.set_sensitive(true);
-            btn.set_label("Test Authentication");
+            btn.set_label(idle_label);
         });
     });
 }
 
 fn update_preview(state: &GuiState) {
-    if let Ok(frame) = state.controller.borrow_mut().receiver.try_recv() {
+    // Drain: the capture thread may have produced several frames since the
+    // last tick, and only the newest is worth painting.
+    let mut latest = None;
+    let mut unavailable = None;
+    while let Ok(event) = state.controller.borrow_mut().receiver.try_recv() {
+        match event {
+            PreviewEvent::Frame(f) => latest = Some(f),
+            PreviewEvent::Unavailable(msg) => unavailable = Some(msg),
+        }
+    }
+
+    if let Some(frame) = latest {
         if frame.width > 0 && frame.height > 0 && !frame.data.is_empty() {
             let texture = gdk::MemoryTexture::new(
                 frame.width,
@@ -290,164 +420,116 @@ fn update_preview(state: &GuiState) {
             state.picture.set_paintable(Some(&texture));
 
             if frame.face_detected {
-                state.status_label.set_markup(
-                    "<span foreground='green' weight='bold'>✓ Face detected</span>",
-                );
+                state
+                    .status_label
+                    .set_markup("<span foreground='#81c784' weight='bold'>Face detected</span>");
             } else {
-                state.status_label.set_markup(
-                    "<span foreground='red'>No face</span>",
-                );
+                state
+                    .status_label
+                    .set_markup("<span foreground='#e57373'>No face</span>");
             }
-        } else {
-            state.status_label.set_text("No camera feed");
         }
+    } else if let Some(msg) = unavailable {
+        // Say why, rather than the old generic "No camera feed".
+        state.status_label.set_markup(&format!(
+            "<span foreground='#e57373'>{}</span>",
+            glib::markup_escape_text(&msg)
+        ));
     }
 }
 
 fn show_toast(state: &GuiState, msg: &str) {
     let toast = libadwaita::Toast::new(msg);
-    toast.set_timeout(3);
+    toast.set_timeout(4);
     state.toast_overlay.add_toast(toast);
-}
-
-fn run_enroll() -> Result<usize, String> {
-    let config = face_auth_core::FaceAuthConfig::load().map_err(|e| e.to_string())?;
-    let _auth = face_auth_core::FaceAuth::new(config).map_err(|e| e.to_string())?;
-    let user = whoami();
-    let frames = 5;
-    // We need a different approach — enroll uses Camera::open internally
-    // For simplicity, shell out to face-enroll CLI
-    let output = std::process::Command::new("face-enroll")
-        .arg("--user")
-        .arg(&user)
-        .arg("--frames")
-        .arg(frames.to_string())
-        .output()
-        .map_err(|e| format!("Failed to run face-enroll: {}", e))?;
-    if output.status.success() {
-        Ok(frames)
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!("Enrollment failed: {}", stderr.trim()))
-    }
-}
-
-fn run_improve() -> Result<usize, String> {
-    let user = whoami();
-    let frames = 5;
-    let output = std::process::Command::new("face-enroll")
-        .arg("--user")
-        .arg(&user)
-        .arg("--frames")
-        .arg(frames.to_string())
-        .arg("--improve")
-        .output()
-        .map_err(|e| format!("Failed to run face-enroll: {}", e))?;
-    if output.status.success() {
-        Ok(frames)
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!("Improve failed: {}", stderr.trim()))
-    }
-}
-
-fn run_test_auth() -> Result<String, String> {
-    let config = face_auth_core::FaceAuthConfig::load().map_err(|e| e.to_string())?;
-    let mut auth = face_auth_core::FaceAuth::new(config).map_err(|e| e.to_string())?;
-    let user = whoami();
-    match auth.authenticate_once(&user) {
-        Ok(true) => Ok("Face matched ✓".to_string()),
-        Ok(false) => Err("No match — face not recognized".to_string()),
-        Err(e) => Err(format!("Test failed: {}", e)),
-    }
-}
-
-fn whoami() -> String {
-    std::env::var("USER").unwrap_or_else(|_| "unknown".to_string())
 }
 
 fn config_path() -> PathBuf {
     dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("~/.config"))
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join("face-auth.toml")
 }
 
-fn load_config() -> face_auth_core::FaceAuthConfig {
-    face_auth_core::FaceAuthConfig::load().unwrap_or_default()
+/// Lowest threshold the authentication path will accept from a user setting.
+fn system_threshold_floor() -> f32 {
+    std::fs::read_to_string(face_auth_core::config::SYSTEM_CONFIG_PATH)
+        .ok()
+        .and_then(|s| toml::from_str::<face_auth_core::FaceAuthConfig>(&s).ok())
+        .map(|c| c.threshold())
+        .unwrap_or(0.6)
 }
 
-fn save_device(path: &PathBuf, device: &str) {
-    let content = if path.exists() {
-        std::fs::read_to_string(path).unwrap_or_default()
-    } else {
-        String::new()
-    };
-    // Simple line-based replacement — just adds/replaces the device key
-    let lines: Vec<String> = content
+/// Replace or insert a single top-level key, preserving everything else.
+///
+/// Written to a temporary file and renamed: writing in place left the config
+/// truncated if the process died mid-write.
+fn save_setting(path: &Path, key: &str, value: &str) -> std::io::Result<()> {
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+
+    let mut lines: Vec<String> = existing
         .lines()
-        .filter(|l| !l.trim().starts_with("device"))
-        .map(|l| l.to_string())
+        .filter(|l| !is_assignment_of(l, key))
+        .map(str::to_string)
         .collect();
-    let mut out = lines.join("\n");
-    if !out.is_empty() && !out.ends_with('\n') {
-        out.push('\n');
+    lines.push(format!("{key} = {value}"));
+
+    let mut body = lines.join("\n");
+    body.push('\n');
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
     }
-    out.push_str(&format!("device = {:?}\n", device));
-    let _ = std::fs::write(path, out);
+    let tmp = path.with_extension("toml.tmp");
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(body.as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)
 }
 
-fn save_threshold(path: &PathBuf, threshold: f32) {
-    let content = if path.exists() {
-        std::fs::read_to_string(path).unwrap_or_default()
-    } else {
-        String::new()
-    };
-    let lines: Vec<String> = content
-        .lines()
-        .filter(|l| !l.trim().starts_with("threshold"))
-        .map(|l| l.to_string())
-        .collect();
-    let mut out = lines.join("\n");
-    if !out.is_empty() && !out.ends_with('\n') {
-        out.push('\n');
+/// Does this line assign exactly `key`? Guards against `threshold` also
+/// matching `detector_threshold`, and against commented-out examples.
+fn is_assignment_of(line: &str, key: &str) -> bool {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('#') {
+        return false;
     }
-    out.push_str(&format!("threshold = {:.2}\n", threshold));
-    let _ = std::fs::write(path, out);
+    match trimmed.split_once('=') {
+        Some((lhs, _)) => lhs.trim() == key,
+        None => false,
+    }
 }
 
-/// Returns (display_names, device_paths) — parallel vectors.
-/// Only IR cameras are shown; non-IR cameras are excluded since
-/// the capture pipeline expects raw 8-bit greyscale (IR sensor format).
-fn enumerate_cameras() -> (Vec<String>, Vec<String>) {
-    let mut candidates = Vec::new();
-    if let Ok(entries) = std::fs::read_dir("/sys/class/video4linux") {
-        for entry in entries.flatten() {
-            let name_path = entry.path().join("name");
-            if let Ok(name) = std::fs::read_to_string(&name_path) {
-                let name = name.trim().to_string();
-                if let Some(dev_name) = entry.file_name().to_str() {
-                    let dev_path = format!("/dev/{}", dev_name);
-                    if name.to_lowercase().contains("ir") || name.to_lowercase().contains("infrared") {
-                        candidates.push((dev_path, name));
-                    }
-                }
-            }
-        }
-    }
-    candidates.sort_by(|a, b| a.0.cmp(&b.0));
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let mut display = Vec::new();
-    let mut paths = Vec::new();
-    for (dev_path, name) in candidates {
-        if face_auth_core::capture::Camera::open(&dev_path).is_ok() {
-            display.push(format!("{} ({})", dev_path, name));
-            paths.push(dev_path);
-        }
+    #[test]
+    fn matches_only_the_exact_key() {
+        assert!(is_assignment_of("threshold = 0.6", "threshold"));
+        assert!(is_assignment_of("  threshold=0.6", "threshold"));
+        assert!(!is_assignment_of("detector_threshold = 0.5", "threshold"));
+        assert!(!is_assignment_of("# threshold = 0.6", "threshold"));
+        assert!(!is_assignment_of("threshold_extra = 1", "threshold"));
+        assert!(!is_assignment_of("some comment", "threshold"));
     }
 
-    if paths.is_empty() {
-        display.push("/dev/video0".to_string());
-        paths.push("/dev/video0".to_string());
+    #[test]
+    fn save_setting_preserves_other_keys_and_comments() {
+        let dir = std::env::temp_dir().join(format!("face-auth-gui-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("face-auth.toml");
+        std::fs::write(&path, "# my config\ndevice = \"/dev/video3\"\nthreshold = 0.6\n").unwrap();
+
+        save_setting(&path, "threshold", "0.80").unwrap();
+        let out = std::fs::read_to_string(&path).unwrap();
+
+        assert!(out.contains("# my config"));
+        assert!(out.contains("device = \"/dev/video3\""));
+        assert!(out.contains("threshold = 0.80"));
+        assert_eq!(out.matches("threshold =").count(), 1);
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
-    (display, paths)
 }

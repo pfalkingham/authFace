@@ -87,7 +87,9 @@ for service in sudo swaylock gdm-password; do
         mv "$conf.face-auth.bak" "$conf"
         echo "Restored $conf from backup"
     else
-        sed -i '/face-auth/d' "$conf" 2>/dev/null || true
+        # Anchored to our own stanza: a bare /face-auth/d would delete any
+        # unrelated line that happens to mention it.
+        sed -i '/pam_exec\.so.*face-auth/d' "$conf" 2>/dev/null || true
         echo "Cleaned $conf"
     fi
 done

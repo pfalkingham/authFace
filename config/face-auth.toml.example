@@ -1,33 +1,51 @@
 # Face Authentication Configuration
-# Copy to /etc/face-auth.toml (system) or ~/.config/face-auth.toml (user)
-# Environment variables FACE_AUTH_* take precedence
+#
+# This file is the SYSTEM configuration: /etc/face-auth.toml
+# It must stay root-owned. It is the only source the PAM authentication path
+# trusts for the camera, the models, and the template directory.
+#
+# Users may also keep ~/.config/face-auth.toml. At the login and sudo prompt
+# that file may only ever make authentication STRICTER:
+#
+#   threshold, detector_threshold   honoured only if >= the value set here
+#   device                          honoured only if it is a real IR capture
+#                                   device present on this machine
+#   scan_duration_ms, scan_interval_ms, capture_timeout_ms
+#                                   honoured within built-in bounds
+#   model_path, detector_model_path, embeddings_dir
+#                                   ignored — system policy only
+#
+# FACE_AUTH_* environment variables affect face-enroll and the settings GUI.
+# They are ignored entirely during PAM authentication.
 
 # IR camera device path (auto-detected if not set)
 # device = "/dev/video3"
 
-# Cosine similarity threshold (0.0 - 1.0, lower = more permissive)
+# Cosine similarity threshold (0.3 - 1.0, HIGHER = stricter match).
+# This is the floor: a user cannot go below it, only above.
 threshold = 0.6
 
 # ONNX model path (default: /usr/local/share/face-auth/w600k_mbf.onnx)
 # model_path = "/usr/local/share/face-auth/w600k_mbf.onnx"
 
-# Embeddings storage directory
+# Template storage directory. Must be root-owned and 0700 — anything that can
+# write here can choose whose face unlocks an account.
 # embeddings_dir = "/var/lib/face-auth"
 
-# Camera capture timeout in milliseconds (default: 5000)
-# Set to 0 for infinite wait (not recommended)
+# Camera capture timeout in milliseconds (100 - 30000, default 5000)
 capture_timeout_ms = 5000
 
 # Face detection ONNX model path (default: /usr/local/share/face-auth/version-slim-320.onnx)
 # detector_model_path = "/usr/local/share/face-auth/version-slim-320.onnx"
 
-# Face detection confidence threshold (0.0 - 1.0, higher = stricter)
+# Face detection confidence threshold (0.05 - 1.0, higher = stricter)
 detector_threshold = 0.5
 
-# How long the face scan window lasts, in milliseconds (default: 5000)
-# The scanner keeps capturing and checking frames until this elapses
-# or a match is found. Like Windows Hello behaviour.
+# How long the face scan window lasts, in milliseconds (500 - 30000, default 5000).
+# The scanner keeps capturing and checking frames until this elapses or a match
+# is found, like Windows Hello.
 scan_duration_ms = 5000
 
-# Delay between capture attempts within a scan window, in milliseconds (default: 200)
+# Delay between capture attempts within a scan window, in milliseconds
+# (0 - 5000, default 200)
 scan_interval_ms = 200

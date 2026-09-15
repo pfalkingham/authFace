@@ -1,122 +1,213 @@
-use face_auth_core::{FaceAuth, FaceAuthConfig};
-use tracing_subscriber::{EnvFilter, fmt};
+//! PAM authentication helper, invoked via `pam_exec.so`.
+//!
+//! Exit 0 authenticates the user; any other status falls through to the next
+//! module in the stack (normally a password prompt). Everything this process
+//! reads from its environment is attacker-influenced except `PAM_USER`, which
+//! `pam_exec` sets from the PAM handle itself.
+
+use face_auth_core::{user, FaceAuth, FaceAuthConfig};
 use std::env;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::time::Instant;
+use tracing_subscriber::{fmt, EnvFilter};
 
-/// Resolve the user's runtime directory: `/run/user/<uid>/`.
-fn runtime_dir_for(user: &str) -> Option<PathBuf> {
-    let output = std::process::Command::new("getent")
-        .arg("passwd")
-        .arg(user)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+/// Status values consumed by the GNOME Shell scan indicator.
+const STATUS_SCANNING: &str = "scanning";
+const STATUS_OK: &str = "ok";
+const STATUS_FAIL: &str = "fail";
+
+/// Publish scan state to `/run/user/<uid>/face-auth-status` for the lock-screen
+/// indicator extension.
+///
+/// This process runs as root while the target directory belongs to the user,
+/// so the write must not follow a symlink: without `O_NOFOLLOW` a user could
+/// point `face-auth-status` at `/etc/shadow` and have root truncate it on
+/// their next unlock attempt. `O_NOFOLLOW` fails rather than following.
+///
+/// The file stays root-owned; the extension can still unlink it, because
+/// removing a directory entry needs write permission on the directory (which
+/// the user owns), not on the file.
+fn write_status(info: &user::UserInfo, status: &str) {
+    let dir = PathBuf::from(format!("/run/user/{}", info.uid));
+    if !dir.is_dir() {
+        return;
     }
-    let line = String::from_utf8(output.stdout).ok()?;
-    let parts: Vec<&str> = line.trim().split(':').collect();
-    if parts.len() < 3 {
-        return None;
+    let path = dir.join("face-auth-status");
+
+    let result = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o644)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&path)
+        .and_then(|mut f| f.write_all(status.as_bytes()));
+
+    if let Err(e) = result {
+        tracing::debug!("could not write scan status to {}: {e}", path.display());
     }
-    let uid: u32 = parts[2].parse().ok()?;
-    let dir = PathBuf::from(format!("/run/user/{}", uid));
-    dir.is_dir().then_some(dir)
 }
 
-/// Write a scan indicator status consumed by the GNOME Shell extension:
-/// `/run/user/<uid>/face-auth-status` containing `scanning`, `ok`, or `fail`.
-fn write_status(user: &str, status: &str) {
-    let Some(runtime_dir) = runtime_dir_for(user) else {
-        return;
+/// Refuse to authenticate a session that is not physically at this machine.
+///
+/// The camera is attached to the console. Without this, a remote `sudo` over
+/// SSH triggers the local IR sensor, and whoever happens to be sitting at the
+/// desk authenticates the remote attacker.
+fn reject_remote_session() -> Result<(), String> {
+    let Ok(rhost) = env::var("PAM_RHOST") else {
+        return Ok(());
     };
-    let path = runtime_dir.join("face-auth-status");
-    let _ = std::fs::write(&path, status.as_bytes());
+    let rhost = rhost.trim();
+    let local = rhost.is_empty()
+        || rhost == "localhost"
+        || rhost == "localhost.localdomain"
+        || rhost == "::1"
+        || rhost.starts_with("127.");
+    if local {
+        Ok(())
+    } else {
+        Err(format!("remote session from {rhost}"))
+    }
+}
+
+fn fail(msg: &str) -> ! {
+    tracing::info!("{msg}");
+    std::process::exit(1)
+}
+
+/// Interactive verification against a stored template. Prints a human-readable
+/// result and exits 0 on a match, 1 otherwise.
+fn run_verify(name: &str) -> ! {
+    if unsafe { libc::geteuid() } != 0 {
+        eprintln!("--verify reads root-owned templates; re-run with sudo or pkexec");
+        std::process::exit(2);
+    }
+    let info = match user::lookup(name) {
+        Ok(info) => info,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    };
+    let config = match FaceAuthConfig::load_for_auth(&info.name) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("config error: {e}");
+            std::process::exit(2);
+        }
+    };
+    let window = config.scan_duration_ms();
+    let interval = config.scan_interval_ms();
+    let mut auth = match FaceAuth::new(config) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("init error: {e}");
+            std::process::exit(2);
+        }
+    };
+    match auth.authenticate_scan(&info.name, window, interval) {
+        Ok(true) => {
+            println!("match");
+            std::process::exit(0);
+        }
+        Ok(false) => {
+            println!("no match");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    }
 }
 
 fn main() {
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("face_auth_core=error"));
-    fmt().with_env_filter(filter).with_writer(std::io::stderr).init();
-    
+        .unwrap_or_else(|_| EnvFilter::new("face_auth_core=error,face_auth=error"));
+    fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
+
     let t0 = Instant::now();
-    
-    let user = env::var("PAM_USER")
-        .or_else(|_| env::var("USER"))
-        .or_else(|_| env::var("LOGNAME"))
-        .unwrap_or_else(|_| {
-            std::process::Command::new("id")
-                .arg("-un")
-                .output()
-                .ok()
-                .and_then(|o| {
-                    if o.status.success() {
-                        String::from_utf8(o.stdout).ok().map(|s| s.trim().to_string())
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or_else(|| {
-                    eprintln!("Could not determine user");
-                    std::process::exit(1);
-                })
-        });
-    
-    eprintln!("TIMING user_resolve: {:?}", t0.elapsed());
-    let t1 = Instant::now();
-    
-    let config = match FaceAuthConfig::load_for_user(Some(&user)) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Config error: {}", e);
-            std::process::exit(1);
+
+    // `--verify <user>` is the settings GUI's "Test Authentication" path. It
+    // reads the same root-owned templates the PAM path does, so it requires
+    // root; it grants nothing a root caller did not already have.
+    let argv: Vec<String> = env::args().skip(1).collect();
+    if !argv.is_empty() {
+        match argv.as_slice() {
+            [flag, name] if flag == "--verify" => run_verify(name),
+            _ => {
+                eprintln!("usage: face-auth            (PAM mode, reads PAM_USER)");
+                eprintln!("       face-auth --verify USER  (test a stored face, requires root)");
+                std::process::exit(2);
+            }
         }
+    }
+
+    // PAM_USER is the only authoritative identity here. USER, LOGNAME and
+    // `id -un` are environment strings or the *invoking* account, not the
+    // account being authenticated, and trusting them lets the wrong template
+    // decide the answer.
+    let username = match env::var("PAM_USER") {
+        Ok(u) if !u.is_empty() => u,
+        _ => fail("PAM_USER is not set; refusing to guess which account to authenticate"),
     };
-    
-    eprintln!("TIMING config_load: {:?}", t1.elapsed());
-    let t2 = Instant::now();
+
+    // Resolve through NSS, which also rejects anything that is not a real,
+    // well-formed account name before it becomes a path component.
+    let info = match user::lookup(&username) {
+        Ok(info) => info,
+        Err(e) => fail(&format!("cannot authenticate '{username}': {e}")),
+    };
+
+    if let Err(reason) = reject_remote_session() {
+        fail(&format!("refusing face authentication for {reason}"));
+    }
+
+    // System config only, plus a strictly-narrowing overlay from the user.
+    let config = match FaceAuthConfig::load_for_auth(&info.name) {
+        Ok(c) => c,
+        Err(e) => fail(&format!("config error: {e}")),
+    };
 
     let scan_duration = config.scan_duration_ms();
     let scan_interval = config.scan_interval_ms();
 
     let mut auth = match FaceAuth::new(config) {
         Ok(a) => a,
-        Err(e) => {
-            eprintln!("Init error: {}", e);
-            std::process::exit(1);
-        }
+        Err(e) => fail(&format!("init error: {e}")),
     };
 
-    eprintln!("TIMING model_load: {:?}", t2.elapsed());
-    let t3 = Instant::now();
-
-    eprintln!(
-        "SCAN: window={}ms interval={}ms user='{}'",
-        scan_duration, scan_interval, user
+    tracing::debug!(
+        user = %info.name,
+        window_ms = scan_duration,
+        interval_ms = scan_interval,
+        setup = ?t0.elapsed(),
+        "starting scan"
     );
 
-    write_status(&user, "scanning");
+    write_status(&info, STATUS_SCANNING);
 
-    match auth.authenticate_scan(&user, scan_duration, scan_interval) {
+    let result = auth.authenticate_scan(&info.name, scan_duration, scan_interval);
+    tracing::debug!(total = ?t0.elapsed(), "scan finished");
+
+    match result {
         Ok(true) => {
-            eprintln!("TIMING authenticate: {:?}", t3.elapsed());
-            eprintln!("TIMING total: {:?}", t0.elapsed());
-            write_status(&user, "ok");
+            write_status(&info, STATUS_OK);
             std::process::exit(0);
         }
         Ok(false) => {
-            eprintln!("TIMING authenticate: {:?}", t3.elapsed());
-            eprintln!("TIMING total: {:?}", t0.elapsed());
-            eprintln!("Face verification failed for user '{}'", user);
-            write_status(&user, "fail");
-            std::process::exit(1);
+            write_status(&info, STATUS_FAIL);
+            fail(&format!("face not recognised for '{}'", info.name));
         }
         Err(e) => {
-            eprintln!("TIMING authenticate: {:?}", t3.elapsed());
-            eprintln!("TIMING total: {:?}", t0.elapsed());
-            eprintln!("Auth error: {}", e);
-            write_status(&user, "fail");
-            std::process::exit(1);
+            write_status(&info, STATUS_FAIL);
+            fail(&format!("face authentication error: {e}"));
         }
     }
 }
