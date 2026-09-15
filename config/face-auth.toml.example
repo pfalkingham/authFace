@@ -18,8 +18,15 @@
 # FACE_AUTH_* environment variables affect face-enroll and the settings GUI.
 # They are ignored entirely during PAM authentication.
 
-# IR camera device path (auto-detected if not set)
-# device = "/dev/video3"
+# IR camera device path.
+#
+# Leave this unset unless you have a reason not to: auto-detection opens each
+# IR-named node and picks the first that is really a GREY capture device. UVC
+# cameras usually expose a metadata node right next to the capture node (e.g.
+# /dev/video2 captures, /dev/video3 does not), and guessing wrong here is the
+# most common setup mistake. Run `cargo run --example detect-camera` to see
+# what your hardware exposes.
+# device = "/dev/video2"
 
 # Cosine similarity threshold (0.3 - 1.0, HIGHER = stricter match).
 # This is the floor: a user cannot go below it, only above.

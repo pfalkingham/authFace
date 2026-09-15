@@ -253,7 +253,7 @@ root; the GUI's slider starts at the system value for the same reason.
 
 Example `/etc/face-auth.toml`:
 ```toml
-device = "/dev/video3"
+device = "/dev/video2"   # usually best left unset; see below
 threshold = 0.6
 model_path = "/usr/local/share/face-auth/w600k_mbf.onnx"
 embeddings_dir = "/var/lib/face-auth"
@@ -263,8 +263,12 @@ capture_timeout_ms = 5000
 Environment variable names follow the field names, so the capture timeout is
 `FACE_AUTH_CAPTURE_TIMEOUT_MS` (not `FACE_AUTH_CAPTURE_TIMEOUT`).
 
-> **Multiple cameras:** with no `device` set, each IR candidate is opened in
-> turn and the first one that works is used. Set `device` explicitly to pin one.
+> **Leave `device` unset unless you must pin it.** UVC cameras normally expose
+> a metadata node right beside the capture node under the same name — on the
+> reference ASUS FHD webcam, `/dev/video2` captures and `/dev/video3` does not.
+> Auto-detection opens each IR-named candidate and takes the first that is
+> really a GREY capture device, which gets this right; a hand-written path
+> often does not.
 
 The GUI writes camera and threshold changes to `~/.config/face-auth.toml`.
 
@@ -443,6 +447,15 @@ invoking it by hand, use `--verify` rather than setting `PAM_USER` yourself.
 The selected device is not an IR sensor — it is an ordinary RGB webcam, or the
 metadata node that sits next to the real capture node. Let auto-detection pick
 one, or check `v4l2-ctl --device /dev/videoN --list-formats`.
+
+### Which camera will it use?
+
+```bash
+cargo run --example detect-camera
+```
+
+Lists every V4L2 node, whether its name looks like an IR sensor, whether it
+really opens as a GREY capture device, and which one authentication would pick.
 
 ### Multi-camera picks the wrong device / no device selected
 

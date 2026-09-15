@@ -63,6 +63,8 @@ Three issues combined into a local privilege escalation on a deployed system.
 - GUI Enroll / Improve / Test run through `pkexec`, so enrolment against a
   root-owned store stays a single click.
 - `face_auth_core::user` module: NSS-backed lookup plus username validation.
+- `cargo run --example detect-camera` — diagnostic listing every V4L2 node, why
+  each is or is not treated as an IR sensor, and which one would be used.
 - Tests covering the config trust boundary, username validation, embedding
   file parsing, verification edge cases, IR name matching and frame geometry.
 
@@ -74,6 +76,11 @@ Three issues combined into a local privilege escalation on a deployed system.
   lacked `session-modes` in `metadata.json`, so it was disabled on the lock
   screen regardless. Both fixed, and the bubble is now actually centred rather
   than pinned to the left edge.
+- **The documented device path was the wrong node.** `config` and the README
+  named `/dev/video3` as the IR camera; on the reference ASUS FHD webcam that
+  is the metadata node and `/dev/video2` is the capture node. Verified against
+  the hardware: auto-detection now resolves `/dev/video2`, rejects `/dev/video3`
+  (no capture format) and rejects `/dev/video0` (reports MJPG, not GREY).
 - **`"ir"` was matched as a substring** when detecting IR cameras, so
   "Virtual Camera" (v4l2loopback) and "Logitech BRIO" both registered as IR
   sensors. Matching is now on word boundaries.
