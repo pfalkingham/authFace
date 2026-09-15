@@ -140,22 +140,56 @@ install -Dm755 "$ARTIFACT_DIR/face-enroll" "$BIN_DIR/face-enroll"
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
+# GitHub release downloads redirect to a CDN that intermittently resets the
+# connection mid-handshake ("TLS connect error: unexpected eof while reading").
+# Retry rather than abandoning a half-finished install; --retry-all-errors so
+# a reset connection counts, not just a retryable HTTP status.
+# verify <file> <expected-sha256> — applied to every model, however it arrived.
+# A file staged in models/ is no more trusted than one off the network.
+verify() {
+    local file="$1" want="$2"
+    if ! echo "$want  $file" | sha256sum -c --status -; then
+        echo "Error: checksum mismatch for $file"
+        echo "  expected: $want"
+        echo "  actual:   $(sha256sum "$file" | cut -d' ' -f1)"
+        echo "Refusing to install a model that is not the one this release pins."
+        return 1
+    fi
+    echo "  checksum OK: $(basename "$file")"
+}
+
+# fetch <url> <dest> <manual-recovery-hint>
+fetch() {
+    local url="$1" dest="$2" hint="$3"
+    curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors \
+         --connect-timeout 20 -o "$dest" "$url" && return 0
+
+    echo ""
+    echo "Download failed after retries: $url"
+    echo ""
+    echo "This script prefers a local copy over downloading, so you can place the"
+    echo "file yourself and re-run:"
+    echo ""
+    echo "$hint"
+    return 1
+}
+
 echo "Installing model..."
 MODEL_NAME="w600k_mbf.onnx"
 if [ -f "$SHARE_DIR/$MODEL_NAME" ]; then
     echo "Model already installed at $SHARE_DIR/$MODEL_NAME"
 elif [ -f "models/$MODEL_NAME" ]; then
+    verify "models/$MODEL_NAME" "$MODEL_CHECKSUM" || exit 1
     install -Dm644 "models/$MODEL_NAME" "$SHARE_DIR/$MODEL_NAME"
     echo "Installed model from models/$MODEL_NAME"
 else
     echo "Downloading model from InsightFace..."
-    curl -fsSL -o "$WORK_DIR/buffalo_sc.zip" "$MODEL_URL"
+    fetch "$MODEL_URL" "$WORK_DIR/buffalo_sc.zip" \
+        "  mkdir -p models
+  curl -fL -o /tmp/buffalo_sc.zip '$MODEL_URL'
+  unzip -j /tmp/buffalo_sc.zip $MODEL_NAME -d models/" || exit 1
     unzip -oq "$WORK_DIR/buffalo_sc.zip" -d "$WORK_DIR/"
-    echo "Verifying checksum..."
-    echo "$MODEL_CHECKSUM  $WORK_DIR/$MODEL_NAME" | sha256sum -c - || {
-        echo "Error: Checksum mismatch! The model may be corrupted or tampered with."
-        exit 1
-    }
+    verify "$WORK_DIR/$MODEL_NAME" "$MODEL_CHECKSUM" || exit 1
     install -Dm644 "$WORK_DIR/$MODEL_NAME" "$SHARE_DIR/$MODEL_NAME"
     echo "Model downloaded and installed"
 fi
@@ -165,16 +199,15 @@ DETECTOR_NAME="version-slim-320.onnx"
 if [ -f "$SHARE_DIR/$DETECTOR_NAME" ]; then
     echo "Detector model already installed at $SHARE_DIR/$DETECTOR_NAME"
 elif [ -f "models/$DETECTOR_NAME" ]; then
+    verify "models/$DETECTOR_NAME" "$DETECTOR_CHECKSUM" || exit 1
     install -Dm644 "models/$DETECTOR_NAME" "$SHARE_DIR/$DETECTOR_NAME"
     echo "Installed detector model from models/$DETECTOR_NAME"
 else
     echo "Downloading face detector model..."
-    curl -fsSL -o "$WORK_DIR/$DETECTOR_NAME" "$DETECTOR_URL"
-    echo "Verifying checksum..."
-    echo "$DETECTOR_CHECKSUM  $WORK_DIR/$DETECTOR_NAME" | sha256sum -c - || {
-        echo "Error: Detector checksum mismatch! Refusing to install."
-        exit 1
-    }
+    fetch "$DETECTOR_URL" "$WORK_DIR/$DETECTOR_NAME" \
+        "  mkdir -p models
+  curl -fL -o models/$DETECTOR_NAME '$DETECTOR_URL'" || exit 1
+    verify "$WORK_DIR/$DETECTOR_NAME" "$DETECTOR_CHECKSUM" || exit 1
     install -Dm644 "$WORK_DIR/$DETECTOR_NAME" "$SHARE_DIR/$DETECTOR_NAME"
     echo "Detector model downloaded and installed"
     echo "Note: if face-auth reports that this model will not load, simplify it:"

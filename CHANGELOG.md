@@ -47,6 +47,10 @@ Three issues combined into a local privilege escalation on a deployed system.
 - **Clamped `bytesused` against the mmap length** in `capture_frame`, the one
   place external data sizes an `unsafe` slice; an oversized value from a buggy
   or hostile driver read past the end of the buffer.
+- **Models staged in `models/` are now checksum-verified too.** Only the
+  download path checked, so a file placed there by hand — which the script
+  prefers over downloading, and which the docs now suggest as a fallback —
+  was installed unverified.
 - **Verified the detector model.** `deploy.sh` downloaded it over `curl -sL`
   with no `-f`, no exit check and no checksum, so an error page could be
   installed as the model. The URL is now pinned to a commit rather than
@@ -112,6 +116,11 @@ Three issues combined into a local privilege escalation on a deployed system.
   anchored to the `pam_exec.so` stanza.
 - `deploy.sh` reports a warning instead of silent success when it cannot find
   a PAM insertion point, and refuses to run as non-root.
+- **Model downloads retry.** GitHub release downloads redirect to a CDN that
+  intermittently resets the connection mid-handshake ("TLS connect error:
+  unexpected eof while reading"), which aborted the install halfway through.
+  `curl` now retries with `--retry-all-errors`, and on persistent failure the
+  script prints the exact commands to stage the file in `models/` by hand.
 - **`deploy.sh` could not build on a machine without a toolchain**, and its
   error pointed at a `face-auth-dev` distrobox that only existed on the
   original development machine. It now:
