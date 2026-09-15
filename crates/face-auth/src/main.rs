@@ -73,8 +73,19 @@ fn reject_remote_session() -> Result<(), String> {
     }
 }
 
-fn fail(msg: &str) -> ! {
+/// A routine authentication outcome: no match, or a session this tool declines
+/// to handle. Logged below the default level, because `pam_exec` relays our
+/// stderr to the terminal and this would otherwise print on every failed sudo.
+fn fail_auth(msg: &str) -> ! {
     tracing::info!("{msg}");
+    std::process::exit(1)
+}
+
+/// A misconfiguration: PAM did not supply a user, the config is broken, a model
+/// is missing, the camera is unusable. These are rare, actionable, and useless
+/// if silent — an admin has to be able to see them without setting RUST_LOG.
+fn fail_setup(msg: &str) -> ! {
+    tracing::error!("{msg}");
     std::process::exit(1)
 }
 
@@ -155,24 +166,24 @@ fn main() {
     // decide the answer.
     let username = match env::var("PAM_USER") {
         Ok(u) if !u.is_empty() => u,
-        _ => fail("PAM_USER is not set; refusing to guess which account to authenticate"),
+        _ => fail_setup("PAM_USER is not set; refusing to guess which account to authenticate"),
     };
 
     // Resolve through NSS, which also rejects anything that is not a real,
     // well-formed account name before it becomes a path component.
     let info = match user::lookup(&username) {
         Ok(info) => info,
-        Err(e) => fail(&format!("cannot authenticate '{username}': {e}")),
+        Err(e) => fail_setup(&format!("cannot authenticate '{username}': {e}")),
     };
 
     if let Err(reason) = reject_remote_session() {
-        fail(&format!("refusing face authentication for {reason}"));
+        fail_auth(&format!("refusing face authentication for {reason}"));
     }
 
     // System config only, plus a strictly-narrowing overlay from the user.
     let config = match FaceAuthConfig::load_for_auth(&info.name) {
         Ok(c) => c,
-        Err(e) => fail(&format!("config error: {e}")),
+        Err(e) => fail_setup(&format!("config error: {e}")),
     };
 
     let scan_duration = config.scan_duration_ms();
@@ -180,7 +191,7 @@ fn main() {
 
     let mut auth = match FaceAuth::new(config) {
         Ok(a) => a,
-        Err(e) => fail(&format!("init error: {e}")),
+        Err(e) => fail_setup(&format!("init error: {e}")),
     };
 
     tracing::debug!(
@@ -203,11 +214,11 @@ fn main() {
         }
         Ok(false) => {
             write_status(&info, STATUS_FAIL);
-            fail(&format!("face not recognised for '{}'", info.name));
+            fail_auth(&format!("face not recognised for '{}'", info.name));
         }
         Err(e) => {
             write_status(&info, STATUS_FAIL);
-            fail(&format!("face authentication error: {e}"));
+            fail_setup(&format!("face authentication error: {e}"));
         }
     }
 }

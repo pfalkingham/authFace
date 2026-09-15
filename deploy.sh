@@ -24,7 +24,7 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-ACTUAL_USER="${SUDO_USER:-$USER}"
+ACTUAL_USER="${SUDO_USER:-${USER:-$(id -un)}}"
 
 # ---- Undo any previous partial setup ----
 echo "Cleaning up any previous partial setup..."
@@ -36,21 +36,102 @@ for service in sudo swaylock gdm-password; do
 done
 
 # ---- Build ----
-if command -v cargo &>/dev/null; then
-    echo "Building face-auth..."
-    cargo build --release --target x86_64-unknown-linux-musl -p face-auth -p face-enroll
-elif [ -f "target/x86_64-unknown-linux-musl/release/face-auth" ]; then
-    echo "Using pre-built binaries from target/..."
+MUSL_TARGET="x86_64-unknown-linux-musl"
+ARTIFACT_DIR="target/$MUSL_TARGET/release"
+
+# Locate cargo. This script runs under sudo, and root's PATH normally does not
+# include the invoking user's rustup installation, so look there as well.
+find_cargo() {
+    if command -v cargo &>/dev/null; then
+        command -v cargo
+        return 0
+    fi
+    if [ -n "${SUDO_USER:-}" ]; then
+        local user_home
+        user_home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+        if [ -n "$user_home" ] && [ -x "$user_home/.cargo/bin/cargo" ]; then
+            echo "$user_home/.cargo/bin/cargo"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# Build as the invoking user, never as root: cargo fetches crates and runs
+# build scripts, and root-owned files left in target/ break their next build.
+as_user() {
+    if [ -n "${SUDO_USER:-}" ] && [ "$(id -u)" -eq 0 ]; then
+        sudo -u "$SUDO_USER" -H "$@"
+    else
+        "$@"
+    fi
+}
+
+build_with_cargo() {
+    local cargo="$1"
+    if ! as_user "$cargo" build --release --target "$MUSL_TARGET" \
+            -p face-auth -p face-enroll; then
+        echo ""
+        echo "Build failed. If the error mentions a missing target, add it with:"
+        echo "  rustup target add $MUSL_TARGET"
+        return 1
+    fi
+}
+
+if [ -f "$ARTIFACT_DIR/face-auth" ] && [ -f "$ARTIFACT_DIR/face-enroll" ] \
+   && [ -z "${FACE_AUTH_FORCE_BUILD:-}" ]; then
+    echo "Using pre-built binaries from $ARTIFACT_DIR/"
+elif CARGO_BIN="$(find_cargo)"; then
+    echo "Building face-auth with $CARGO_BIN..."
+    build_with_cargo "$CARGO_BIN" || exit 1
 else
-    echo "Error: cargo not found and no pre-built binaries in target/"
-    echo "Build first: distrobox enter face-auth-dev -- cargo build --release --target x86_64-unknown-linux-musl"
+    CONTAINER_ENGINE=""
+    for engine in podman docker; do
+        command -v "$engine" &>/dev/null && { CONTAINER_ENGINE="$engine"; break; }
+    done
+
+    echo "Error: no Rust toolchain found, and no pre-built binaries in $ARTIFACT_DIR/."
+    echo ""
+
+    if [ -n "$CONTAINER_ENGINE" ]; then
+        # Deliberately not run from here: this script is under sudo, and
+        # rootless $CONTAINER_ENGINE driven through `sudo -u` frequently fails
+        # on a missing XDG_RUNTIME_DIR. Running it directly is reliable, and
+        # keeps the build artifacts owned by you.
+        echo "Option 1 — build in a container, no toolchain needed."
+        echo "Run this as yourself (NOT with sudo), then re-run sudo ./deploy.sh:"
+        echo ""
+        echo "  $CONTAINER_ENGINE run --rm -v \"\$PWD\":/src:Z -w /src \\"
+        echo "    docker.io/library/rust:alpine \\"
+        echo "    sh -c 'apk add --no-cache musl-dev && \\"
+        echo "           cargo build --release --target $MUSL_TARGET \\"
+        echo "             -p face-auth -p face-enroll'"
+        echo ""
+        echo "Option 2 — install a Rust toolchain:"
+    else
+        echo "Install a Rust toolchain:"
+    fi
+
+    echo "  Arch/CachyOS:  sudo pacman -S --needed rust"
+    echo "  Fedora:        sudo dnf install rust cargo"
+    echo "  Or rustup:     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+    echo "  Then:          rustup target add $MUSL_TARGET"
+    echo ""
+    echo "Either way, re-run sudo ./deploy.sh afterwards."
     exit 1
 fi
 
+for bin in face-auth face-enroll; do
+    if [ ! -f "$ARTIFACT_DIR/$bin" ]; then
+        echo "Error: expected $ARTIFACT_DIR/$bin after the build, but it is missing."
+        exit 1
+    fi
+done
+
 # ---- Install binaries ----
 echo "Installing binaries..."
-install -Dm755 target/x86_64-unknown-linux-musl/release/face-auth "$BIN_DIR/face-auth"
-install -Dm755 target/x86_64-unknown-linux-musl/release/face-enroll "$BIN_DIR/face-enroll"
+install -Dm755 "$ARTIFACT_DIR/face-auth" "$BIN_DIR/face-auth"
+install -Dm755 "$ARTIFACT_DIR/face-enroll" "$BIN_DIR/face-enroll"
 
 # ---- Install models ----
 # Staged in a private mktemp directory. A fixed /tmp path can be pre-created by

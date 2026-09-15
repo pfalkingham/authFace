@@ -112,6 +112,29 @@ Three issues combined into a local privilege escalation on a deployed system.
   anchored to the `pam_exec.so` stanza.
 - `deploy.sh` reports a warning instead of silent success when it cannot find
   a PAM insertion point, and refuses to run as non-root.
+- **`deploy.sh` could not build on a machine without a toolchain**, and its
+  error pointed at a `face-auth-dev` distrobox that only existed on the
+  original development machine. It now:
+  - finds `cargo` in the invoking user's `~/.cargo/bin`, which root's `PATH`
+    does not include, so `sudo ./deploy.sh` works after a rustup install;
+  - runs the build as that user rather than as root, so cargo does not fetch
+    crates and run build scripts as root or leave root-owned files in `target/`;
+  - offers to build in a `rust:alpine` container when no toolchain is present;
+  - gives distro-specific install commands instead of naming a container that
+    may not exist;
+  - verifies the expected binaries exist before trying to install them.
+  `deploy-gui.sh` gets the same cargo discovery and non-root build (no container
+  fallback — the GUI links against the host's GTK4).
+- **All three scripts aborted with "USER: unbound variable"** under `set -u`
+  wherever the environment does not define `USER`/`HOME` (containers, cron,
+  some sudo configurations). They now fall back to the real uid via `id -un`
+  and `getent`.
+- `face-auth` exited silently on a misconfiguration, because setup failures and
+  routine auth outcomes both logged below the default level. Setup failures
+  (no `PAM_USER`, bad config, missing model, unusable camera) now log at
+  `error` so they are visible without setting `RUST_LOG`; "no match" and
+  declined remote sessions stay quiet, so `pam_exec` does not print on every
+  failed sudo.
 
 ### Changed
 

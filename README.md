@@ -122,7 +122,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 rustup target add x86_64-unknown-linux-musl
 
 # Clone and build
-git clone https://github.com/SamVivan1/authFace.git
+git clone https://github.com/pfalkingham/authFace.git
 cd authFace
 cargo build --release --target x86_64-unknown-linux-musl -p face-auth -p face-enroll
 
@@ -133,8 +133,10 @@ sudo ./deploy.sh
 ### GUI (dynamic GTK — needs GTK4 + libadwaita devel packages)
 
 ```bash
-# Install GTK development libraries (Fedora)
-sudo dnf install gtk4-devel libadwaita-devel
+# Install GTK development libraries
+sudo pacman -S --needed gtk4 libadwaita        # Arch / CachyOS
+sudo dnf install gtk4-devel libadwaita-devel   # Fedora
+sudo apt install libgtk-4-dev libadwaita-1-dev # Debian / Ubuntu
 
 # Build
 cargo build --release -p face-auth-gtk
@@ -143,20 +145,42 @@ cargo build --release -p face-auth-gtk
 sudo ./deploy-gui.sh
 ```
 
+### Without installing a toolchain (container build)
+
+If `deploy.sh` finds no toolchain it prints this command for you to run. It
+does not run it for you: `deploy.sh` runs under `sudo`, and rootless podman
+driven through `sudo -u` often fails on a missing `XDG_RUNTIME_DIR`.
+
+```bash
+podman run --rm -v "$PWD":/src:Z -w /src docker.io/library/rust:alpine \
+  sh -c 'apk add --no-cache musl-dev && \
+         cargo build --release --target x86_64-unknown-linux-musl \
+           -p face-auth -p face-enroll'
+sudo ./deploy.sh
+```
+
+`rust:alpine` targets musl natively, so the result is the same static binary.
+Run the container as your own user (not under `sudo`) so the files in `target/`
+stay yours. This does not work for the GTK GUI, which links against the host's
+GTK4 and must be built on the host.
+
 ### On immutable distros via distrobox
 
 ```bash
 # Create a Fedora development container
-distrobox create --image docker.io/library/fedora:40 --name authface-dev
+distrobox create --image registry.fedoraproject.org/fedora:latest --name authface-dev
 distrobox enter authface-dev
 
-# Inside the container, install build deps (once)
-sudo dnf install -y rust cargo gcc gcc-c++ musl-gcc cmake gtk4-devel libadwaita-devel
+# Inside the container, install build deps (once).
+# Note: Fedora does not package a musl std for Rust, so the musl build needs
+# rustup rather than the distro `rust` package.
+sudo dnf install -y gcc musl-gcc gtk4-devel libadwaita-devel
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+  --target x86_64-unknown-linux-musl
+source "$HOME/.cargo/env"
 
-# Clone and build
-cd ~/Projects
-git clone https://github.com/SamVivan1/authFace.git
-cd authFace
+# Build
+cd ~/Projects/authFace
 cargo build --release --target x86_64-unknown-linux-musl -p face-auth -p face-enroll
 cargo build --release -p face-auth-gtk
 
@@ -165,6 +189,15 @@ exit
 sudo ./deploy.sh
 sudo ./deploy-gui.sh
 ```
+
+The GUI binary links against GTK4 dynamically, so build it in an environment
+whose GTK version matches the host's — a distrobox sharing the host is fine, an
+unrelated container image may not be.
+
+> **`sudo ./deploy.sh` and `cargo`:** if you installed Rust with rustup, `cargo`
+> lives in `~/.cargo/bin`, which is not on root's `PATH`. The script looks there
+> for the invoking user and runs the build as that user rather than as root, so
+> `sudo ./deploy.sh` works and does not leave root-owned files in `target/`.
 
 ## Deployment
 

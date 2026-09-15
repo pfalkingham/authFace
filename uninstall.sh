@@ -16,8 +16,8 @@ if [ -n "${SUDO_USER:-}" ]; then
     ACTUAL_USER="$SUDO_USER"
     ACTUAL_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
 else
-    ACTUAL_USER="$USER"
-    ACTUAL_HOME="$HOME"
+    ACTUAL_USER="${USER:-$(id -un)}"
+    ACTUAL_HOME="${HOME:-$(getent passwd "$ACTUAL_USER" | cut -d: -f6)}"
 fi
 
 # ---- Check if /usr is writable (immutable FS detection) ----
