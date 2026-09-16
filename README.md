@@ -1,5 +1,7 @@
 # authFace — IR Camera Face Unlock for Linux
 
+By [Peter Falkingham](https://peterfalkingham.com)
+
 <p align="center">
   <img src="data/com.github.pfalkingham.face-auth-gtk.svg" width="128" height="128" alt="authFace logo">
 </p>
@@ -7,7 +9,7 @@
 **Windows Hello–style biometric login for Linux.** IR camera facial authentication via PAM — works on **immutable distros** (Bazzite, Bluefin, Fedora Silverblue, Fedora Kinoite, etc.) with zero system packages, daemons, or layering.
 
 > [!NOTE]
-> This repository is a **personal fork** of [pfalkingham/authFace](https://github.com/pfalkingham/authFace). All credit for the original design and implementation goes to the upstream author. This fork adds a few personal-quality-of-life fixes documented below. See [License](#license).
+> Includes improvements contributed via [SamVivan1/authFace](https://github.com/SamVivan1/authFace) — robust IR camera detection, distro-aware PAM configuration, and the GNOME Shell lock-screen scan indicator. See [Upstream Merges & Security Pass](#upstream-merges--security-pass).
 
 - **Face unlock for sudo, lock screen (GNOME/Sway), and `gdm-password`**
 - **~2 seconds** from camera poll to authenticated
