@@ -42,7 +42,7 @@ impl Default for FaceAuthConfig {
             detector_model_path: None,
             detector_threshold: Some(0.5),
             scan_duration_ms: Some(5000),
-            scan_interval_ms: Some(200),
+            scan_interval_ms: Some(0),
         }
     }
 }
@@ -244,9 +244,15 @@ impl FaceAuthConfig {
             .clamp(*SCAN_DURATION_RANGE.start(), *SCAN_DURATION_RANGE.end())
     }
 
+    /// Extra delay between scan attempts.
+    ///
+    /// Defaults to zero: the loop is already paced by the camera, which
+    /// delivers 15 frames a second while a single attempt costs ~235ms of
+    /// inference, so it cannot spin. The old 200ms default added most of a
+    /// second across a handful of attempts for nothing.
     pub fn scan_interval_ms(&self) -> u64 {
         self.scan_interval_ms
-            .unwrap_or(200)
+            .unwrap_or(0)
             .clamp(*SCAN_INTERVAL_RANGE.start(), *SCAN_INTERVAL_RANGE.end())
     }
 }
@@ -369,7 +375,7 @@ mod tests {
         };
         cfg.apply_user_overlay(&overlay);
         assert_eq!(cfg.scan_duration_ms(), 8000);
-        assert_eq!(cfg.scan_interval_ms(), 200, "out-of-range value ignored");
+        assert_eq!(cfg.scan_interval_ms(), 0, "out-of-range value ignored");
     }
 
     #[test]

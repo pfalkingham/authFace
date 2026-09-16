@@ -53,6 +53,10 @@ detector_threshold = 0.5
 # is found, like Windows Hello.
 scan_duration_ms = 5000
 
-# Delay between capture attempts within a scan window, in milliseconds
-# (0 - 5000, default 200)
-scan_interval_ms = 200
+# Extra delay between capture attempts within a scan window, in milliseconds
+# (0 - 5000, default 0).
+#
+# Zero is right for almost everyone: the scan loop is already paced by the
+# camera and by inference, so it cannot spin. Raise it only to trade unlock
+# speed for CPU.
+scan_interval_ms = 0

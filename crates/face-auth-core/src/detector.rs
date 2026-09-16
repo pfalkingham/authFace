@@ -54,7 +54,7 @@ const DETECTOR_WIDTH: usize = 320;
 const DETECTOR_HEIGHT: usize = 240;
 
 pub struct FaceDetector {
-    model: InferenceSimplePlan<InferenceModel>,
+    model: TypedRunnableModel<TypedModel>,
     threshold: f32,
 }
 
@@ -63,7 +63,19 @@ impl FaceDetector {
         if !std::path::Path::new(model_path).exists() {
             anyhow::bail!("face detector model not found at {model_path}");
         }
-        let model = onnx().model_for_path(model_path)?.into_runnable()?;
+        // The input fact is required before optimisation: without a concrete
+        // shape the graph stays symbolic and tract cannot lower it.
+        let model = onnx()
+            .model_for_path(model_path)?
+            .with_input_fact(
+                0,
+                InferenceFact::dt_shape(
+                    f32::datum_type(),
+                    tvec!(1, 3, DETECTOR_HEIGHT, DETECTOR_WIDTH),
+                ),
+            )?
+            .into_optimized()?
+            .into_runnable()?;
         Ok(Self { model, threshold })
     }
 

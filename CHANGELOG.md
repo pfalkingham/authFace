@@ -165,6 +165,32 @@ Three issues combined into a local privilege escalation on a deployed system.
   declined remote sessions stay quiet, so `pam_exec` does not print on every
   failed sudo.
 
+### Performance
+
+- **Unlock is ~2.6x faster per scan attempt.** Neither ONNX model was ever run
+  through `into_optimized()`, so tract executed both graphs op-by-op as written;
+  the detector had no input fact either, leaving its shapes symbolic and
+  optimisation impossible. Measured on the reference machine:
+
+  | stage | before | after |
+  |-------|--------|-------|
+  | encode | 398 ms | 112 ms |
+  | detect | 177 ms | 75 ms |
+  | per attempt | 622 ms | 235 ms |
+
+  Model loading rises from 25 ms to 313 ms, since the optimisation pass now runs
+  at load. That is paid once per unlock and repaid within the first attempt.
+
+  Verified numerically equivalent: encoding a fixed input before and after gives
+  cosine similarity 1.0000000000, max element difference 2.4e-7. **Existing
+  enrolled templates remain valid.**
+- **`scan_interval_ms` now defaults to 0** (was 200). It was pure sleep between
+  attempts. The loop cannot spin — the camera delivers 15 fps and one attempt
+  costs ~235 ms of inference — so the delay bought nothing and cost most of a
+  second across a handful of attempts.
+- Added `cargo run --example bench`, which reports model-load cost and a
+  per-stage breakdown of each scan attempt.
+
 ### Changed
 
 - **Enrolment now requires root** (`sudo face-enroll`), a direct consequence of
@@ -212,6 +238,32 @@ Three issues combined into a local privilege escalation on a deployed system.
 - `uninstall.sh --purge` flag to optionally remove user embeddings
 - Architecture and security limitation documentation in README
 - CHANGELOG.md
+
+### Performance
+
+- **Unlock is ~2.6x faster per scan attempt.** Neither ONNX model was ever run
+  through `into_optimized()`, so tract executed both graphs op-by-op as written;
+  the detector had no input fact either, leaving its shapes symbolic and
+  optimisation impossible. Measured on the reference machine:
+
+  | stage | before | after |
+  |-------|--------|-------|
+  | encode | 398 ms | 112 ms |
+  | detect | 177 ms | 75 ms |
+  | per attempt | 622 ms | 235 ms |
+
+  Model loading rises from 25 ms to 313 ms, since the optimisation pass now runs
+  at load. That is paid once per unlock and repaid within the first attempt.
+
+  Verified numerically equivalent: encoding a fixed input before and after gives
+  cosine similarity 1.0000000000, max element difference 2.4e-7. **Existing
+  enrolled templates remain valid.**
+- **`scan_interval_ms` now defaults to 0** (was 200). It was pure sleep between
+  attempts. The loop cannot spin — the camera delivers 15 fps and one attempt
+  costs ~235 ms of inference — so the delay bought nothing and cost most of a
+  second across a handful of attempts.
+- Added `cargo run --example bench`, which reports model-load cost and a
+  per-stage breakdown of each scan attempt.
 
 ### Changed
 - Clarified SELinux policy scope and trade-offs in documentation
