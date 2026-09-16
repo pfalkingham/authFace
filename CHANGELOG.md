@@ -69,6 +69,9 @@ Three issues combined into a local privilege escalation on a deployed system.
 - `face_auth_core::user` module: NSS-backed lookup plus username validation.
 - `cargo run --example detect-camera` — diagnostic listing every V4L2 node, why
   each is or is not treated as an IR sensor, and which one would be used.
+- `cargo run --example frame-stats` — captures consecutive frames and prints
+  per-frame mean, variance and min/max plus PNG dumps. This is what identified
+  the strobing illuminator; keep it for diagnosing "no face detected".
 - Tests covering the config trust boundary, username validation, embedding
   file parsing, verification edge cases, IR name matching and frame geometry.
 
@@ -85,6 +88,23 @@ Three issues combined into a local privilege escalation on a deployed system.
   is the metadata node and `/dev/video2` is the capture node. Verified against
   the hardware: auto-detection now resolves `/dev/video2`, rejects `/dev/video3`
   (no capture format) and rejects `/dev/video0` (reports MJPG, not GREY).
+- **The GUI preview flickered between a real IR image and a grey mess, and
+  enrolment could never succeed.** The IR module strobes its illuminator,
+  emitting a lit frame and a near-black one alternately at 15 fps (measured on
+  the reference ASUS sensor: lit frames mean 48-96, dark 1.8-8). Two bugs
+  compounded:
+    - `raw_frame_has_content` required a variance above 100_000 in the u16
+      domain, which is a variance of **1.5** in 8-bit units. Dark frames measure
+      3.4-39, so they passed. `histogram_equalize` then stretched their 0-23
+      range across the full scale, turning sensor noise into a high-contrast
+      grey field that the detector searched in vain.
+    - Enrolment's 400 ms interval is almost exactly 6 frames at 14.98 fps. Six
+      is even, so it could lock onto the dark phase and see *only* unusable
+      frames for every attempt.
+  Frames are now captured in pairs, keeping the brighter — which needs no
+  assumption that a strobe exists, since on a steady camera the two are alike.
+  The quality gate checks mean brightness as well as variance, in documented
+  8-bit units, and reports which check failed rather than a bare "no face".
 - **`"ir"` was matched as a substring** when detecting IR cameras, so
   "Virtual Camera" (v4l2loopback) and "Logitech BRIO" both registered as IR
   sensors. Matching is now on word boundaries.

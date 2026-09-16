@@ -481,6 +481,24 @@ The selected device is not an IR sensor — it is an ordinary RGB webcam, or the
 metadata node that sits next to the real capture node. Let auto-detection pick
 one, or check `v4l2-ctl --device /dev/videoN --list-formats`.
 
+### Preview flickers, or "no face detected" every time
+
+Most Windows Hello IR modules **strobe their illuminator**, emitting a lit frame
+and a near-black one alternately. Check what yours does:
+
+```bash
+cargo run --example frame-stats
+```
+
+On the reference ASUS sensor the lit frames mean 71–237 (of 255) and the unlit
+ones 2–5, strictly alternating at 15 fps. authFace captures frames in pairs and
+keeps the brighter, so this is handled — but if `frame-stats` shows *every*
+frame dark, the illuminator is not firing and no amount of software will help.
+
+A dark frame is worse than useless: histogram equalisation stretches its narrow
+range across the full scale and turns sensor noise into a high-contrast grey
+field, which is what a flickering preview is showing you.
+
 ### Which camera will it use?
 
 ```bash

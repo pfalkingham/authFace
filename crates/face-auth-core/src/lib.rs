@@ -10,7 +10,7 @@ pub mod verify;
 
 pub use crate::capture::Camera;
 pub use crate::config::FaceAuthConfig;
-use crate::detector::FaceDetector;
+use crate::detector::{assess_frame, FaceDetector, FrameQuality};
 use crate::error::FaceAuthError;
 use crate::inference::FaceEncoder;
 use crate::storage::EmbeddingStore;
@@ -65,7 +65,9 @@ impl FaceAuth {
         )?;
         tracing::debug!(elapsed = ?t1.elapsed(), "frame captured");
 
-        if !crate::detector::raw_frame_has_content(&frame) {
+        let quality = assess_frame(&frame);
+        if quality != FrameQuality::Ok {
+            tracing::debug!(%quality, "frame rejected before inference");
             return Err(FaceAuthError::NoFaceDetected.into());
         }
 
@@ -100,6 +102,7 @@ impl FaceAuth {
         let deadline = Instant::now() + Duration::from_millis(duration_ms);
         let mut frame_num: usize = 0;
         let mut consecutive_errors = 0u32;
+        let mut last_reject: Option<FrameQuality> = None;
 
         // Wait out the remainder of the interval without overrunning the window.
         let nap = |deadline: Instant| {
@@ -112,12 +115,20 @@ impl FaceAuth {
 
         loop {
             if Instant::now() >= deadline {
-                tracing::debug!(frames = frame_num, "scan window elapsed without a match");
+                // If nothing ever reached the detector, say why: "no match" and
+                // "the illuminator never fired" need very different fixes.
+                match last_reject {
+                    Some(q) => tracing::debug!(
+                        frames = frame_num,
+                        "scan window elapsed; no frame passed quality checks — last: {q}"
+                    ),
+                    None => tracing::debug!(frames = frame_num, "scan window elapsed without a match"),
+                }
                 return Ok(false);
             }
 
             frame_num += 1;
-            let frame = match cam.capture_frame(self.config.capture_timeout_ms()) {
+            let frame = match cam.capture_illuminated_frame(self.config.capture_timeout_ms()) {
                 Ok(f) => {
                     consecutive_errors = 0;
                     f
@@ -133,7 +144,10 @@ impl FaceAuth {
                 }
             };
 
-            if !crate::detector::raw_frame_has_content(&frame) {
+            let quality = assess_frame(&frame);
+            if quality != FrameQuality::Ok {
+                tracing::trace!(frame = frame_num, %quality, "frame rejected");
+                last_reject = Some(quality);
                 nap(deadline);
                 continue;
             }
@@ -170,14 +184,17 @@ impl FaceAuth {
         let mut attempts = 0usize;
         let max_attempts = frames.saturating_mul(3);
         let before = store.embeddings.len();
+        let mut last_reject: Option<FrameQuality> = None;
 
         while captured < frames && attempts < max_attempts {
             attempts += 1;
             progress(EnrollProgress::Capturing { captured, wanted: frames, attempt: attempts });
 
-            let frame = cam.capture_frame(self.config.capture_timeout_ms())?;
+            let frame = cam.capture_illuminated_frame(self.config.capture_timeout_ms())?;
 
-            if !crate::detector::raw_frame_has_content(&frame) {
+            let quality = assess_frame(&frame);
+            if quality != FrameQuality::Ok {
+                last_reject = Some(quality);
                 progress(EnrollProgress::NoContent);
                 std::thread::sleep(Duration::from_millis(interval_ms));
                 continue;
@@ -206,11 +223,20 @@ impl FaceAuth {
         // Check what *this* run produced. Testing the whole store would let an
         // append silently succeed having captured nothing.
         if store.embeddings.len() == before {
-            anyhow::bail!(
-                "no face detected in any of {} attempts — check the camera is the IR sensor \
-                 and that your face is lit and in frame",
-                attempts
-            );
+            match last_reject {
+                Some(q) => anyhow::bail!(
+                    "no usable frame in {} attempts: {}\n\
+                     Run `cargo run --example frame-stats` to see what the sensor is \
+                     delivering.",
+                    attempts,
+                    q
+                ),
+                None => anyhow::bail!(
+                    "no face detected in any of {} attempts — check the camera is the IR \
+                     sensor and that your face is lit and in frame",
+                    attempts
+                ),
+            }
         }
 
         Ok(())

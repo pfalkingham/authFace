@@ -26,6 +26,16 @@ const V4L2_PIX_FMT_GREY: u32 = 0x5945_5247;
 /// Refuse implausible geometry from `G_FMT` before it sizes an allocation.
 const MAX_DIMENSION: u32 = 8192;
 
+/// Buffers to request from the driver.
+///
+/// One is not enough. Between `DQBUF` and the following `QBUF` the driver has
+/// nowhere to put an incoming frame, so it drops it — which means two
+/// successive captures are not necessarily adjacent frames. On a sensor that
+/// strobes its illuminator on alternate frames, that makes the phase of what
+/// you get unpredictable, and "take the brighter of two" can hand back two
+/// unlit frames in a row. A small ring keeps a buffer queued at all times.
+const BUFFER_COUNT: u32 = 4;
+
 // Kernel struct v4l2_format: type(4) + padding(4) + union raw_data[200] = 208 bytes
 #[repr(C)]
 struct v4l2_format {
@@ -95,10 +105,26 @@ pub struct IrFrame {
     pub height: u32,
 }
 
+impl IrFrame {
+    /// Mean sample value, 0.0–65535.0. Accumulated in f64 because a 640x400
+    /// frame sums a quarter of a million terms.
+    pub fn mean_intensity(&self) -> f64 {
+        if self.data.is_empty() {
+            return 0.0;
+        }
+        self.data.iter().map(|&v| v as f64).sum::<f64>() / self.data.len() as f64
+    }
+}
+
+/// One mmap'd capture buffer.
+struct MappedBuffer {
+    ptr: *mut c_void,
+    length: usize,
+}
+
 pub struct Camera {
     fd: OwnedFd,
-    mmap_ptr: *mut c_void,
-    length: usize,
+    buffers: Vec<MappedBuffer>,
     width: u32,
     height: u32,
     stream_on: bool,
@@ -150,50 +176,65 @@ impl Camera {
         }
 
         let mut reqbuf = v4l2_requestbuffers {
-            count: 1,
+            count: BUFFER_COUNT,
             type_: V4L2_BUF_TYPE_VIDEO_CAPTURE,
             memory: V4L2_MEMORY_MMAP,
             reserved: [0, 0],
         };
         ioctl(fd.as_raw_fd(), VIDIOC_REQBUFS, &mut reqbuf as *mut _ as *mut c_void)?;
-
-        let mut buf = v4l2_buffer {
-            index: 0,
-            type_: V4L2_BUF_TYPE_VIDEO_CAPTURE,
-            memory: V4L2_MEMORY_MMAP,
-            ..unsafe { std::mem::zeroed() }
-        };
-        ioctl(fd.as_raw_fd(), VIDIOC_QUERYBUF, &mut buf as *mut _ as *mut c_void)?;
-
-        let length = buf.length as usize;
-        let offset = buf.m as libc::off_t;
-
-        let mmap_ptr = unsafe {
-            mmap(
-                std::ptr::null_mut(),
-                length,
-                PROT_READ,
-                MAP_SHARED,
-                fd.as_raw_fd(),
-                offset,
-            )
-        };
-        if mmap_ptr == MAP_FAILED {
-            return Err(anyhow::anyhow!("mmap failed"));
+        if reqbuf.count == 0 {
+            return Err(anyhow::anyhow!("{} allocated no capture buffers", device_path));
         }
 
-        Ok(Self { fd, mmap_ptr, length, width, height, stream_on: false })
-    }
-
-    pub fn capture_frame(&mut self, timeout_ms: i32) -> Result<IrFrame> {
-        if !self.stream_on {
-            let buf = v4l2_buffer {
-                index: 0,
+        // The driver may grant fewer buffers than requested; honour what it says.
+        let mut buffers: Vec<MappedBuffer> = Vec::with_capacity(reqbuf.count as usize);
+        for index in 0..reqbuf.count {
+            let mut buf = v4l2_buffer {
+                index,
                 type_: V4L2_BUF_TYPE_VIDEO_CAPTURE,
                 memory: V4L2_MEMORY_MMAP,
                 ..unsafe { std::mem::zeroed() }
             };
-            ioctl(self.fd.as_raw_fd(), VIDIOC_QBUF, &buf as *const _ as *mut c_void)?;
+            ioctl(fd.as_raw_fd(), VIDIOC_QUERYBUF, &mut buf as *mut _ as *mut c_void)?;
+
+            let length = buf.length as usize;
+            let offset = buf.m as libc::off_t;
+            let ptr = unsafe {
+                mmap(
+                    std::ptr::null_mut(),
+                    length,
+                    PROT_READ,
+                    MAP_SHARED,
+                    fd.as_raw_fd(),
+                    offset,
+                )
+            };
+            if ptr == MAP_FAILED {
+                // Unmap whatever succeeded before giving up.
+                for b in &buffers {
+                    unsafe { munmap(b.ptr, b.length) };
+                }
+                return Err(anyhow::anyhow!("mmap failed for buffer {index}"));
+            }
+            buffers.push(MappedBuffer { ptr, length });
+        }
+
+        Ok(Self { fd, buffers, width, height, stream_on: false })
+    }
+
+    pub fn capture_frame(&mut self, timeout_ms: i32) -> Result<IrFrame> {
+        if !self.stream_on {
+            // Queue every buffer before streaming, so the driver always has
+            // somewhere to write and never has to drop a frame.
+            for index in 0..self.buffers.len() as u32 {
+                let buf = v4l2_buffer {
+                    index,
+                    type_: V4L2_BUF_TYPE_VIDEO_CAPTURE,
+                    memory: V4L2_MEMORY_MMAP,
+                    ..unsafe { std::mem::zeroed() }
+                };
+                ioctl(self.fd.as_raw_fd(), VIDIOC_QBUF, &buf as *const _ as *mut c_void)?;
+            }
             let stream_type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
             ioctl(self.fd.as_raw_fd(), VIDIOC_STREAMON, &stream_type as *const _ as *mut c_void)?;
             self.stream_on = true;
@@ -214,58 +255,85 @@ impl Camera {
         }
 
         let mut buf = v4l2_buffer {
-            index: 0,
             type_: V4L2_BUF_TYPE_VIDEO_CAPTURE,
             memory: V4L2_MEMORY_MMAP,
             ..unsafe { std::mem::zeroed() }
         };
-        if ioctl(self.fd.as_raw_fd(), VIDIOC_DQBUF, &mut buf as *mut _ as *mut c_void).is_ok() {
-            // `bytesused` comes from the driver and is not trusted to fit the
-            // mapping: this is the one place external data sizes an unsafe
-            // read, and an oversized value would run off the end of the mmap.
-            let bytes_used = (buf.bytesused as usize).min(self.length);
-            if bytes_used < buf.bytesused as usize {
-                tracing::warn!(
-                    reported = buf.bytesused,
-                    mapped = self.length,
-                    "driver reported more bytes than the buffer holds; truncating"
-                );
-            }
-            let data_slice =
-                unsafe { std::slice::from_raw_parts(self.mmap_ptr as *const u8, bytes_used) };
-            let data: Vec<u16> = data_slice.iter().map(|&b| (b as u16) * 257).collect();
-
-            let _ = ioctl(self.fd.as_raw_fd(), VIDIOC_QBUF, &mut buf as *mut _ as *mut c_void);
-
-            let expected = self.width as usize * self.height as usize;
-            if data.len() < expected {
-                return Err(anyhow::anyhow!(
-                    "short frame: got {} bytes, expected {} for {}x{} GREY",
-                    data.len(),
-                    expected,
-                    self.width,
-                    self.height
-                ));
-            }
-
-            Ok(IrFrame { data, width: self.width, height: self.height })
-        } else {
+        if ioctl(self.fd.as_raw_fd(), VIDIOC_DQBUF, &mut buf as *mut _ as *mut c_void).is_err() {
             let err = std::io::Error::last_os_error();
-            // Requeue so the next call has a buffer to fill; otherwise every
-            // subsequent poll in a scan window just times out.
-            let requeue = v4l2_buffer {
-                index: 0,
-                type_: V4L2_BUF_TYPE_VIDEO_CAPTURE,
-                memory: V4L2_MEMORY_MMAP,
-                ..unsafe { std::mem::zeroed() }
-            };
-            let _ = ioctl(
-                self.fd.as_raw_fd(),
-                VIDIOC_QBUF,
-                &requeue as *const _ as *mut c_void,
-            );
-            Err(anyhow::anyhow!("Failed to capture frame: {}", err))
+            return Err(anyhow::anyhow!("Failed to capture frame: {}", err));
         }
+
+        let index = buf.index as usize;
+        let Some(mapped) = self.buffers.get(index) else {
+            return Err(anyhow::anyhow!(
+                "driver dequeued buffer index {index}, only {} are mapped",
+                self.buffers.len()
+            ));
+        };
+
+        // `bytesused` comes from the driver and is not trusted to fit the
+        // mapping: this is the one place external data sizes an unsafe read,
+        // and an oversized value would run off the end of the mmap.
+        let bytes_used = (buf.bytesused as usize).min(mapped.length);
+        if bytes_used < buf.bytesused as usize {
+            tracing::warn!(
+                reported = buf.bytesused,
+                mapped = mapped.length,
+                "driver reported more bytes than the buffer holds; truncating"
+            );
+        }
+        let data_slice = unsafe { std::slice::from_raw_parts(mapped.ptr as *const u8, bytes_used) };
+        let data: Vec<u16> = data_slice.iter().map(|&b| (b as u16) * 257).collect();
+
+        // Hand the buffer straight back so the ring stays full.
+        let _ = ioctl(self.fd.as_raw_fd(), VIDIOC_QBUF, &mut buf as *mut _ as *mut c_void);
+
+        let expected = self.width as usize * self.height as usize;
+        if data.len() < expected {
+            return Err(anyhow::anyhow!(
+                "short frame: got {} bytes, expected {} for {}x{} GREY",
+                data.len(),
+                expected,
+                self.width,
+                self.height
+            ));
+        }
+
+        Ok(IrFrame { data, width: self.width, height: self.height })
+    }
+
+    /// Capture a frame, preferring an illuminated one.
+    ///
+    /// Windows Hello IR modules commonly strobe their illuminator, emitting a
+    /// lit frame and a near-black ambient frame alternately. On the reference
+    /// ASUS sensor the lit frames average 48–96 (of 255) and the dark ones
+    /// 2–8, strictly alternating at 15 fps.
+    ///
+    /// A dark frame is not merely useless: histogram equalisation stretches its
+    /// 0–23 range across the full scale and turns sensor noise into a
+    /// high-contrast grey field, which the detector then searches in vain.
+    /// Worse, a capture interval that happens to be an even number of frames
+    /// locks onto one phase, so an unlucky caller sees *only* dark frames.
+    ///
+    /// Taking the brighter of two consecutive frames sidesteps all of that
+    /// without assuming the strobe exists: on a camera that does not strobe the
+    /// two frames are alike and either will do.
+    pub fn capture_illuminated_frame(&mut self, timeout_ms: i32) -> Result<IrFrame> {
+        let first = self.capture_frame(timeout_ms)?;
+
+        // If the second capture fails, the first is still a usable answer.
+        let second = match self.capture_frame(timeout_ms) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::debug!("second frame of pair failed, using the first: {e}");
+                return Ok(first);
+            }
+        };
+
+        let (a, b) = (first.mean_intensity(), second.mean_intensity());
+        tracing::trace!(first_mean = a, second_mean = b, "illumination pair");
+        Ok(if b > a { second } else { first })
     }
 
     fn stop_stream(&mut self) {
@@ -280,13 +348,15 @@ impl Camera {
 impl Drop for Camera {
     fn drop(&mut self) {
         self.stop_stream();
-        unsafe { munmap(self.mmap_ptr, self.length) };
+        for b in &self.buffers {
+            unsafe { munmap(b.ptr, b.length) };
+        }
     }
 }
 
 pub fn capture_ir_frame(device_path: &str, timeout_ms: i32) -> Result<IrFrame> {
     let mut cam = Camera::open(device_path)?;
-    let frame = cam.capture_frame(timeout_ms)?;
+    let frame = cam.capture_illuminated_frame(timeout_ms)?;
     cam.stop_stream();
     Ok(frame)
 }

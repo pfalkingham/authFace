@@ -5,7 +5,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use face_auth_core::capture::{Camera, IrFrame};
-use face_auth_core::detector::{raw_frame_has_content, FaceDetector};
+use face_auth_core::detector::{assess_frame, FaceDetector, FrameQuality};
 use face_auth_core::preprocess::histogram_equalize;
 
 /// Cap how long a single capture may block, so switching camera or pressing
@@ -135,10 +135,13 @@ fn capture_loop(
             }
         }
 
+        // Paired capture: this sensor strobes its illuminator, so every other
+        // frame is near-black. Showing those made the preview flicker between a
+        // real image and an equalised noise field.
         let captured = camera
             .as_mut()
             .expect("camera opened just above")
-            .capture_frame(PREVIEW_CAPTURE_TIMEOUT_MS);
+            .capture_illuminated_frame(PREVIEW_CAPTURE_TIMEOUT_MS);
 
         let frame = match captured {
             Ok(f) => f,
@@ -152,9 +155,12 @@ fn capture_loop(
             }
         };
 
-        if !raw_frame_has_content(&frame) {
+        let quality = assess_frame(&frame);
+        if quality != FrameQuality::Ok {
             face_detected = false;
-            send(&tx, &frame, false);
+            // Show the raw frame, never an equalised one: equalising a dark
+            // frame is exactly what produced the grey mess.
+            let _ = tx.try_send(PreviewEvent::Unavailable(format!("{quality}")));
             continue;
         }
 
