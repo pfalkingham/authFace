@@ -3,7 +3,6 @@ use image::{DynamicImage, ImageBuffer, Luma};
 use tract_onnx::prelude::tract_ndarray::Array3;
 
 const ENCODER_SIZE: usize = 112;
-const HISTOGRAM_BINS: usize = 65536;
 
 /// Wrap a captured frame as a 16-bit greyscale image.
 ///
@@ -61,32 +60,118 @@ pub fn preprocess_ir_frame(frame: &IrFrame) -> anyhow::Result<Array3<f32>> {
     Ok(array)
 }
 
-/// Flatten the frame's intensity distribution so the encoder sees consistent
-/// contrast regardless of how brightly the IR illuminator lit the scene.
+/// Default CLAHE parameters. `CLIP_LIMIT` follows OpenCV's convention: the
+/// per-bin ceiling is `clip * tile_pixels / 256`, with the clipped mass
+/// redistributed. Howdy uses 2.0; 3.0 measured better on this sensor's frames
+/// without visibly amplifying noise.
+pub const CLAHE_CLIP_LIMIT: f32 = 3.0;
+pub const CLAHE_TILES: u32 = 8;
+
+/// Contrast-limited adaptive histogram equalisation.
 ///
-/// The lookup tables are heap-allocated: as stack arrays they were 512 KB per
-/// call, which is most of a spawned thread's default stack.
-pub fn histogram_equalize(frame: &mut IrFrame) {
-    if frame.data.is_empty() {
+/// Replaces the global equalisation this used to do. Global equalisation maps
+/// one CDF over the whole frame, so a dark IR frame — where nearly all samples
+/// sit in a narrow band — gets that band stretched across the full range,
+/// turning sensor noise into hard posterised contours. Measured on this
+/// camera, the face detector scored ~0.11 on globally-equalised frames (below
+/// its 0.5 threshold, indistinguishable from an empty room) and 0.60-0.99 on
+/// the same frames under CLAHE.
+///
+/// CLAHE instead equalises per tile with a ceiling on how much any one
+/// intensity may be amplified, then bilinearly interpolates between
+/// neighbouring tiles' mappings so no tile seams appear.
+///
+/// Samples are u16 carrying 8-bit data widened by 257 (see `capture_frame`),
+/// so 256 bins are exact here.
+pub fn clahe_equalize(frame: &mut IrFrame, clip_limit: f32, tiles: u32) {
+    let (w, h) = (frame.width as usize, frame.height as usize);
+    if frame.data.is_empty() || w == 0 || h == 0 || frame.data.len() < w * h {
         return;
     }
+    let tiles = tiles.max(1) as usize;
+    let tile_w = w.div_ceil(tiles);
+    let tile_h = h.div_ceil(tiles);
 
-    let mut hist = vec![0u32; HISTOGRAM_BINS];
-    for &val in &frame.data {
-        hist[val as usize] += 1;
+    // One 256-entry lookup table per tile.
+    let mut luts = vec![[0u8; 256]; tiles * tiles];
+    for ty in 0..tiles {
+        for tx in 0..tiles {
+            let x0 = tx * tile_w;
+            let y0 = ty * tile_h;
+            let x1 = (x0 + tile_w).min(w);
+            let y1 = (y0 + tile_h).min(h);
+            if x0 >= x1 || y0 >= y1 {
+                continue;
+            }
+
+            let mut hist = [0u32; 256];
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    hist[(frame.data[y * w + x] >> 8) as usize] += 1;
+                }
+            }
+
+            // Clip, then hand the excess back evenly. This is what bounds the
+            // contrast gain and stops noise being amplified without limit.
+            let count = ((x1 - x0) * (y1 - y0)) as f32;
+            let limit = ((clip_limit * count) / 256.0).max(1.0) as u32;
+            let mut excess: u32 = 0;
+            for b in hist.iter_mut() {
+                if *b > limit {
+                    excess += *b - limit;
+                    *b = limit;
+                }
+            }
+            let share = excess / 256;
+            let mut remainder = excess % 256;
+            for b in hist.iter_mut() {
+                *b += share;
+                if remainder > 0 {
+                    *b += 1;
+                    remainder -= 1;
+                }
+            }
+
+            let lut = &mut luts[ty * tiles + tx];
+            let total = count.max(1.0);
+            let mut cumulative = 0u32;
+            for (i, &b) in hist.iter().enumerate() {
+                cumulative += b;
+                lut[i] = ((cumulative as f32 / total) * 255.0).clamp(0.0, 255.0) as u8;
+            }
+        }
     }
 
-    let total = frame.data.len() as f32;
-    let mut cdf = vec![0f32; HISTOGRAM_BINS];
-    let mut sum = 0f32;
-    for i in 0..HISTOGRAM_BINS {
-        sum += hist[i] as f32;
-        cdf[i] = sum / total;
-    }
+    // Bilinear blend between the four nearest tile centres.
+    for y in 0..h {
+        let gy = ((y as f32 - tile_h as f32 * 0.5) / tile_h as f32).max(0.0);
+        let ty0 = (gy as usize).min(tiles - 1);
+        let ty1 = (ty0 + 1).min(tiles - 1);
+        let fy = gy - ty0 as f32;
 
-    for val in &mut frame.data {
-        *val = (cdf[*val as usize] * 65535.0) as u16;
+        for x in 0..w {
+            let gx = ((x as f32 - tile_w as f32 * 0.5) / tile_w as f32).max(0.0);
+            let tx0 = (gx as usize).min(tiles - 1);
+            let tx1 = (tx0 + 1).min(tiles - 1);
+            let fx = gx - tx0 as f32;
+
+            let v = (frame.data[y * w + x] >> 8) as usize;
+            let tl = luts[ty0 * tiles + tx0][v] as f32;
+            let tr = luts[ty0 * tiles + tx1][v] as f32;
+            let bl = luts[ty1 * tiles + tx0][v] as f32;
+            let br = luts[ty1 * tiles + tx1][v] as f32;
+
+            let top = tl + (tr - tl) * fx;
+            let bottom = bl + (br - bl) * fx;
+            let out = (top + (bottom - top) * fy).clamp(0.0, 255.0) as u16;
+            frame.data[y * w + x] = out * 257;
+        }
     }
+}
+
+/// Equalise a frame for detection and encoding, using the project defaults.
+pub fn histogram_equalize(frame: &mut IrFrame) {
+    clahe_equalize(frame, CLAHE_CLIP_LIMIT, CLAHE_TILES);
 }
 
 #[cfg(test)]
@@ -134,18 +219,41 @@ mod tests {
     }
 
     #[test]
-    fn equalization_spreads_a_narrow_range() {
-        let mut f = frame(vec![100, 100, 200, 200, 300, 300, 400, 400], 4, 2);
+    fn clahe_expands_a_low_contrast_frame() {
+        // A dark, narrow-range frame — what an unlit-ish IR capture looks like.
+        let data: Vec<u16> = (0..64 * 64).map(|i| ((i % 20) as u16 + 20) * 257).collect();
+        let mut f = frame(data, 64, 64);
+        let before = spread(&f);
         histogram_equalize(&mut f);
-        // The brightest input bin maps to full scale.
-        assert_eq!(*f.data.iter().max().unwrap(), 65535);
-        assert!(f.data.iter().any(|&v| v < 65535));
+        assert!(spread(&f) > before, "CLAHE should widen the tonal range");
+        assert!(f.data.iter().all(|&v| v % 257 == 0), "output stays 8-bit widened");
     }
 
     #[test]
-    fn equalization_handles_empty_frame() {
-        let mut f = frame(vec![], 0, 0);
+    fn clahe_leaves_a_flat_frame_flat() {
+        // Uniform input has no contrast to recover; it must not explode into
+        // noise, which is precisely what the clip limit is for.
+        let mut f = frame(vec![128 * 257; 64 * 64], 64, 64);
         histogram_equalize(&mut f);
-        assert!(f.data.is_empty());
+        let first = f.data[0];
+        assert!(f.data.iter().all(|&v| v == first));
+    }
+
+    #[test]
+    fn clahe_handles_degenerate_frames() {
+        let mut empty = frame(vec![], 0, 0);
+        histogram_equalize(&mut empty);
+        assert!(empty.data.is_empty());
+
+        // Short buffer must be left alone rather than indexed out of bounds.
+        let mut short = frame(vec![100; 10], 32, 32);
+        histogram_equalize(&mut short);
+        assert_eq!(short.data.len(), 10);
+    }
+
+    fn spread(f: &IrFrame) -> u16 {
+        let max = f.data.iter().copied().max().unwrap_or(0);
+        let min = f.data.iter().copied().min().unwrap_or(0);
+        max - min
     }
 }

@@ -105,6 +105,28 @@ Three issues combined into a local privilege escalation on a deployed system.
   assumption that a strobe exists, since on a steady camera the two are alike.
   The quality gate checks mean brightness as well as variance, in documented
   8-bit units, and reports which check failed rather than a bare "no face".
+- **Face detection failed on nearly every frame, because global histogram
+  equalisation was destroying the image.** A dark IR frame has almost all its
+  samples in a narrow band; mapping one CDF over the whole frame stretched that
+  band across the full range and turned sensor noise into hard posterised
+  contours. Measured on the reference camera with the detector's 0.5 threshold:
+
+  | preprocessing | detector score |
+  |---------------|----------------|
+  | raw | 0.11 - 0.22 |
+  | global equalisation (old) | **0.11 - 0.13** |
+  | CLAHE clip 2.0 | 0.60 - 0.96 |
+  | CLAHE clip 3.0 (new default) | **0.76 - 0.98** |
+
+  Live burst before: 0/24 frames detected. After: 16/16 at ~0.99.
+
+  Replaced with contrast-limited adaptive histogram equalisation — equalise per
+  tile with a ceiling on amplification, bilinearly interpolated between tiles.
+  This is what Howdy does (`cv2.createCLAHE`), and comparing against Howdy is
+  what identified the cause.
+
+  **This changes what an embedding means, so existing enrolments must be
+  redone.** Since enrolment was failing anyway, nothing is lost.
 - **`"ir"` was matched as a substring** when detecting IR cameras, so
   "Virtual Camera" (v4l2loopback) and "Logitech BRIO" both registered as IR
   sensors. Matching is now on word boundaries.
