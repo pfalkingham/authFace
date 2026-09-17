@@ -48,10 +48,13 @@ fn build_ui(app: &libadwaita::Application) {
     // a value that silently does nothing at the login screen.
     let system_floor = system_threshold_floor();
 
-    let username = match face_auth_core::user::current() {
+    // The account to enrol and test. Resolved from whoever invoked the app, not
+    // the process UID: started with `sudo face-auth-gtk` the latter is root, and
+    // the app would enrol root's face while PAM authenticates the desktop user.
+    let username = match face_auth_core::user::invoking() {
         Ok(info) => info.name,
         Err(e) => {
-            eprintln!("cannot determine the current user: {e}");
+            eprintln!("cannot determine which user to enrol: {e}");
             String::new()
         }
     };
@@ -166,7 +169,23 @@ fn build_ui(app: &libadwaita::Application) {
     button_box.append(&improve_button);
     button_box.append(&test_button);
 
+    // Say out loud whose face this will enrol. Getting this wrong is silent and
+    // costly: you enrol one account and authenticate as another, and both the
+    // Enrol and Test buttons happily agree with each other.
+    let account_row = libadwaita::ActionRow::builder()
+        .title("Account")
+        .subtitle(if username.is_empty() {
+            "Unknown — enrolment and testing are disabled".to_string()
+        } else if username == "root" {
+            format!("{username} — this is probably not what you want; \
+                     close this and run face-auth-gtk without sudo")
+        } else {
+            format!("{username} — Enroll, Improve and Test all apply to this account")
+        })
+        .build();
+
     let prefs_group = libadwaita::PreferencesGroup::new();
+    prefs_group.add(&account_row);
     prefs_group.add(&device_row);
     prefs_group.add(&threshold_row);
 

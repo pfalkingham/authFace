@@ -127,6 +127,15 @@ Three issues combined into a local privilege escalation on a deployed system.
 
   **This changes what an embedding means, so existing enrolments must be
   redone.** Since enrolment was failing anyway, nothing is lost.
+- **The GUI enrolled the wrong account when started with `sudo`.** It picked
+  its target user from `getuid()`, so `sudo face-auth-gtk` ran as root and its
+  Enroll, Improve and Test buttons all operated on **root's** template. All
+  three agreed with each other and appeared to work, while PAM authenticated
+  the desktop user against a template that was never written — "works in the
+  GUI, fails at the lock screen". The GUI now resolves the invoking user via
+  `SUDO_UID`/`PKEXEC_UID` before falling back to the process UID, and shows an
+  **Account** row naming exactly whose face the buttons apply to, with a
+  warning when that resolves to root.
 - **`"ir"` was matched as a substring** when detecting IR cameras, so
   "Virtual Camera" (v4l2loopback) and "Logitech BRIO" both registered as IR
   sensors. Matching is now on word boundaries.
