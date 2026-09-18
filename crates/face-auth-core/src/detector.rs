@@ -162,9 +162,15 @@ fn preprocess_for_detector(frame: &IrFrame) -> anyhow::Result<tract_ndarray::Arr
     for y in 0..DETECTOR_HEIGHT {
         for x in 0..DETECTOR_WIDTH {
             let pixel = rgb.get_pixel(x as u32, y as u32);
-            array[[0, y, x]] = pixel.0[0] as f32 / 255.0;
-            array[[1, y, x]] = pixel.0[1] as f32 / 255.0;
-            array[[2, y, x]] = pixel.0[2] as f32 / 255.0;
+            // Ultra-Light version-slim-320 expects inputs normalized with
+            // image_mean 127 and image_std 128, i.e. (pixel - 127) / 128
+            // (see vision/slim.py in linzaer/Ultra-Light-Fast-Generic-Face-
+            // Detector-1MB). Feeding 0..1 values made the detector return
+            // near-zero confidence on every frame, so enrollment and
+            // authentication always failed with "No face detected".
+            array[[0, y, x]] = (pixel.0[0] as f32 - 127.0) / 128.0;
+            array[[1, y, x]] = (pixel.0[1] as f32 - 127.0) / 128.0;
+            array[[2, y, x]] = (pixel.0[2] as f32 - 127.0) / 128.0;
         }
     }
 
