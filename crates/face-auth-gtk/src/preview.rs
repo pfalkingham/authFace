@@ -13,6 +13,9 @@ use face_auth_core::preprocess::histogram_equalize;
 const PREVIEW_CAPTURE_TIMEOUT_MS: i32 = 400;
 /// Pause before retrying after the camera goes away (unplugged, or in use).
 const RETRY_DELAY: Duration = Duration::from_millis(500);
+/// Capture failures tolerated on an open handle before it is dropped and the
+/// device reopened.
+const MAX_CONSECUTIVE_ERRORS: usize = 3;
 /// Run face detection at most this often. The preview itself streams at the
 /// camera's own rate; inference every frame would peg a core for no visible
 /// benefit, since the badge only has to keep up with a person moving.
@@ -122,6 +125,7 @@ fn capture_loop(
     let mut camera: Option<Camera> = None;
     let mut last_detect = Instant::now() - DETECT_INTERVAL;
     let mut face_detected = false;
+    let mut consecutive_errors = 0usize;
 
     while !shutdown.load(Ordering::Relaxed) {
         if camera.is_none() {
@@ -144,8 +148,19 @@ fn capture_loop(
             .capture_illuminated_frame(PREVIEW_CAPTURE_TIMEOUT_MS);
 
         let frame = match captured {
-            Ok(f) => f,
+            Ok(f) => {
+                consecutive_errors = 0;
+                f
+            }
+            // UVC IR cameras commonly deliver a truncated frame right after
+            // STREAMON. Reopening on that would hit it again every time, so
+            // only give up on the handle after repeated failures.
+            Err(_) if consecutive_errors + 1 < MAX_CONSECUTIVE_ERRORS => {
+                consecutive_errors += 1;
+                continue;
+            }
             Err(e) => {
+                consecutive_errors = 0;
                 // Drop the handle so the next iteration reopens the device.
                 camera = None;
                 face_detected = false;

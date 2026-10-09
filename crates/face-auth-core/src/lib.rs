@@ -185,12 +185,29 @@ impl FaceAuth {
         let max_attempts = frames.saturating_mul(3);
         let before = store.embeddings.len();
         let mut last_reject: Option<FrameQuality> = None;
+        let mut consecutive_errors = 0usize;
 
         while captured < frames && attempts < max_attempts {
             attempts += 1;
             progress(EnrollProgress::Capturing { captured, wanted: frames, attempt: attempts });
 
-            let frame = cam.capture_illuminated_frame(self.config.capture_timeout_ms())?;
+            // Tolerate transient capture errors the same way authentication
+            // does: UVC IR cameras commonly deliver a truncated, error-flagged
+            // frame right after STREAMON.
+            let frame = match cam.capture_illuminated_frame(self.config.capture_timeout_ms()) {
+                Ok(f) => {
+                    consecutive_errors = 0;
+                    f
+                }
+                Err(e) => {
+                    consecutive_errors += 1;
+                    tracing::warn!(attempt = attempts, error = %e, "capture failed");
+                    if consecutive_errors >= 3 {
+                        return Err(e);
+                    }
+                    continue;
+                }
+            };
 
             let quality = assess_frame(&frame);
             if quality != FrameQuality::Ok {
